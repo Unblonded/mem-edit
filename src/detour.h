@@ -39,6 +39,11 @@ public:
     // how many editable NOP bytes to reserve at the start of the cave for your own code.
     bool InstallTrampoline(const Process& proc, uint64_t entry, size_t userBytes, std::string& error);
 
+    // Rewrites the stolen immediate instruction (e.g. an `add [gold], 25`) in the cave with a new
+    // value, letting it grow past the original immediate width. The widened instruction goes in the
+    // cave's free bytes and the stolen copy of it is NOP'd, so the new value takes effect.
+    bool SetCaveImmediate(const Process& proc, uint64_t entry, uint64_t value, std::string& error);
+
     void SetEnabled(const Process& proc, uint64_t entry, bool enabled);
     void Remove(const Process& proc, uint64_t entry);  // restores original, frees the cave
     void RestoreAll(const Process& proc);

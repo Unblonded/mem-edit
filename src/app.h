@@ -156,6 +156,7 @@ private:
     char m_detourTarget[256] = "";
     int m_caveUserBytes = 32;
     uint64_t m_caveRecForInsn = 0; // which instruction m_caveUserBytes was auto-sized for
+    char m_caveImmInput[32] = "";  // new value to write into a cave's immediate instruction
     std::string m_detourStatus;
 
     // Hex calculator

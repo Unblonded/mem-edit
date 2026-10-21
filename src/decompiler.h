@@ -38,3 +38,11 @@ bool EncodeImmediate(const std::vector<uint8_t>& insnBytes, bool x64, uint64_t v
 // target. `original` receives the bytes that were there before.
 bool PatchImmediate(const Process& proc, const InstructionRow& row, uint64_t value,
                     std::vector<uint8_t>& original, std::string& error);
+
+// Re-encodes `insnBytes` with its immediate set to `value`, ALLOWING the encoding to grow (so a
+// value too big for the original immediate width still works), and fixes a RIP-relative memory
+// operand so the instruction still targets the same absolute address when placed at `newAddr`
+// (it originally lived at `origAddr`). Intended for writing a widened instruction into a cave.
+bool EncodeImmediateReloc(const std::vector<uint8_t>& insnBytes, bool x64, uint64_t value,
+                          uint64_t origAddr, uint64_t newAddr, std::vector<uint8_t>& encoded,
+                          std::string& error);

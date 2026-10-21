@@ -1,5 +1,7 @@
 #include "detour.h"
 
+#include "decompiler.h"
+
 #include <Zydis/Zydis.h>
 
 #include <windows.h>
@@ -297,6 +299,54 @@ bool DetourManager::InstallTrampoline(const Process& proc, uint64_t entry, size_
     d.kind = "trampoline";
     d.location = proc.Symbolize(entry);
     m_detours.push_back(std::move(d));
+    return true;
+}
+
+bool DetourManager::SetCaveImmediate(const Process& proc, uint64_t entry, uint64_t value, std::string& error)
+{
+    if (!proc.IsOpen()) { error = "No process attached"; return false; }
+    Detour* d = FindMutable(entry);
+    if (!d || !d->cave) { error = "This entry has no cave."; return false; }
+
+    const bool x64 = proc.Is64();
+    ZydisDecoder dec;
+    ZydisDecoderInit(&dec, x64 ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
+                     x64 ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
+
+    // Locate the first stolen instruction that carries a plain (non-branch) immediate.
+    size_t ao = 0, al = 0;
+    bool found = false;
+    for (size_t off = 0; off < d->original.size();)
+    {
+        ZydisDecodedInstruction ins;
+        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec, d->original.data() + off, d->original.size() - off, &ins, ops)))
+            break;
+        for (int i = 0; i < ins.operand_count_visible; i++)
+            if (ops[i].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !ops[i].imm.is_relative) { found = true; break; }
+        if (found) { ao = off; al = ins.length; break; }
+        off += ins.length;
+    }
+    if (!found) { error = "No immediate instruction was stolen into this cave."; return false; }
+
+    std::vector<uint8_t> insn(d->original.begin() + ao, d->original.begin() + ao + al);
+    std::vector<uint8_t> encoded;
+    if (!EncodeImmediateReloc(insn, x64, value, entry + ao, d->cave, encoded, error)) return false;
+    if (encoded.size() > d->caveUserSize)
+    {
+        error = "Not enough free bytes (" + std::to_string(encoded.size()) + " needed, " +
+                std::to_string(d->caveUserSize) + " free). Reinstall the cave with more free bytes.";
+        return false;
+    }
+
+    // Free region = the widened instruction followed by NOPs.
+    std::vector<uint8_t> freeBytes(d->caveUserSize, 0x90);
+    memcpy(freeBytes.data(), encoded.data(), encoded.size());
+    if (!proc.Write(d->cave, freeBytes.data(), freeBytes.size())) { error = "Could not write the cave."; return false; }
+
+    // NOP the stolen copy of that instruction so the value isn't applied twice.
+    std::vector<uint8_t> nops(al, 0x90);
+    proc.Write(d->cave + d->caveUserSize + ao, nops.data(), nops.size());
     return true;
 }
 

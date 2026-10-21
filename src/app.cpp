@@ -2103,6 +2103,27 @@ void App::DrawDetours()
                     ImGui::SetClipboardText(BytesToHex(d.original.data(), d.original.size()).c_str());
                 ImGui::SameLine();
                 ImGui::TextDisabled("cave %s  |  %zu free bytes", ToHex(d.cave).c_str(), d.caveUserSize);
+
+                // Set the immediate (e.g. the +25) to any value, even one too big for the original
+                // width - it's re-encoded wider and written into the cave's free bytes.
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("set value");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(Px(120));
+                ImGui::InputText("##caveimm", m_caveImmInput, sizeof(m_caveImmInput));
+                ImGui::SetItemTooltip("Hex by default (3E8 = 1000); prefix 0n for decimal.");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Apply"))
+                {
+                    const char* s = m_caveImmInput;
+                    uint64_t v = 0;
+                    if (s[0] == '0' && (s[1] == 'n' || s[1] == 'N')) v = strtoull(s + 2, nullptr, 10);
+                    else if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) v = strtoull(s + 2, nullptr, 16);
+                    else v = strtoull(s, nullptr, 16);
+                    std::string e;
+                    if (!m_detours.SetCaveImmediate(m_proc, d.entry, v, e)) m_detourStatus = e;
+                    else { m_detourStatus = "Cave at " + ToHex(d.cave) + " now uses value " + ToHex(v); Log(m_detourStatus); }
+                }
                 ImGui::PopID();
             }
         }

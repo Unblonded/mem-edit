@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <set>
 #include <string>
@@ -1187,6 +1190,90 @@ bool EncodeImmediate(const std::vector<uint8_t>& insnBytes, bool x64, uint64_t v
 
     encoded.assign(enc, enc + len);
     encoded.resize(insnBytes.size(), 0x90); // pad a shorter encoding with NOPs
+    return true;
+}
+
+bool EncodeImmediateReloc(const std::vector<uint8_t>& insnBytes, bool x64, uint64_t value,
+                          uint64_t origAddr, uint64_t newAddr, std::vector<uint8_t>& encoded,
+                          std::string& error)
+{
+    ZydisDecoder dec = MakeDecoder(x64);
+    ZydisDecodedInstruction ins{};
+    ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT]{};
+    if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec, insnBytes.data(), insnBytes.size(), &ins, ops)))
+    {
+        error = "Could not decode the instruction";
+        return false;
+    }
+    int idx = PatchableOperand(ins, ops);
+    if (idx < 0)
+    {
+        error = "This instruction has no immediate operand to change";
+        return false;
+    }
+
+    ZydisEncoderRequest req{};
+    if (!ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(&ins, ops, ins.operand_count_visible, &req)))
+    {
+        error = "Could not turn the instruction back into an encoder request";
+        return false;
+    }
+    req.operands[idx].imm.u = value;
+
+    // Is one operand a RIP-relative memory reference we must keep pointed at the same address?
+    int memIdx = -1;
+    for (int i = 0; i < ins.operand_count_visible; i++)
+        if (ops[i].type == ZYDIS_OPERAND_TYPE_MEMORY && ops[i].mem.base == ZYDIS_REGISTER_RIP) memIdx = i;
+    const uint64_t ripTarget = origAddr + ins.length + (uint64_t)ins.raw.disp.value;
+
+    auto emit = [&](std::vector<uint8_t>& out) -> bool {
+        uint8_t enc[ZYDIS_MAX_INSTRUCTION_LENGTH]{};
+        size_t len = sizeof(enc);
+        if (!ZYAN_SUCCESS(ZydisEncoderEncodeInstruction(&req, enc, &len)))
+        {
+            error = "That value cannot be encoded for this instruction";
+            return false;
+        }
+        out.assign(enc, enc + len);
+        return true;
+    };
+
+    std::vector<uint8_t> first;
+    if (!emit(first)) return false;
+
+    // A RIP-relative displacement is always 32-bit, so the length is stable: fix the displacement
+    // for the cave position now that we know how long the instruction is, then encode for real.
+    if (memIdx >= 0)
+    {
+        int64_t newDisp = (int64_t)ripTarget - (int64_t)(newAddr + first.size());
+        if (newDisp < INT32_MIN || newDisp > INT32_MAX)
+        {
+            error = "The target is too far from the cave for this instruction.";
+            return false;
+        }
+        req.operands[memIdx].mem.displacement = newDisp;
+        if (!emit(encoded)) return false;
+    }
+    else
+    {
+        encoded = first;
+    }
+
+    // Confirm the encoding really carries the value we asked for.
+    ZydisDecodedInstruction chk{};
+    ZydisDecodedOperand chkOps[ZYDIS_MAX_OPERAND_COUNT]{};
+    if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec, encoded.data(), encoded.size(), &chk, chkOps)))
+    {
+        error = "The new encoding does not decode";
+        return false;
+    }
+    int ci = PatchableOperand(chk, chkOps);
+    uint64_t mask = (ci < 0 || chkOps[ci].size >= 64) ? ~0ull : (1ull << chkOps[ci].size) - 1;
+    if (ci < 0 || (chkOps[ci].imm.value.u & mask) != (value & mask))
+    {
+        error = "That value does not fit this instruction";
+        return false;
+    }
     return true;
 }
 
