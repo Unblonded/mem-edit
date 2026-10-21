@@ -25,6 +25,10 @@ struct InstructionRow
 // Linear disassembly of the function that contains `address`.
 bool DisassembleFunction(const Process& proc, uint64_t address, std::vector<InstructionRow>& out, std::string& error);
 
+// Linear disassembly of a raw byte buffer, decoded as if it were loaded at `base`. Useful for
+// bytes that no longer live at their original address (e.g. a detour's saved original code).
+void DisassembleBytes(const std::vector<uint8_t>& bytes, uint64_t base, bool x64, std::vector<InstructionRow>& out);
+
 // Re-encodes `insnBytes` with its immediate operand set to `value`. The result is at most as
 // long as the input, padded with NOPs if shorter. Does not touch the target.
 bool EncodeImmediate(const std::vector<uint8_t>& insnBytes, bool x64, uint64_t value,

@@ -1,5 +1,6 @@
 #pragma once
 #include "decompiler.h"
+#include "detour.h"
 #include "hexview.h"
 #include "patches.h"
 #include "target.h"
@@ -63,11 +64,14 @@ private:
     void DrawTraceWindows();
     void StartTrace(uint64_t address, int size, TraceKind kind);
     void DrawDecompile();
+    void DrawCalculator();
     void StartDecompile(uint64_t address);
     void RunDecompile();
     void DrawDisasm();
     void DrawPatchPanel(const InstructionRow& row);
     void DrawActivePatches();
+    void DrawDetours();
+    int RecommendCaveBytes() const; // free-byte suggestion sized to the selected instruction
     void SetupDefaultLayout(unsigned int dockId);
 
     void Attach(DWORD pid);
@@ -146,4 +150,18 @@ private:
     char m_newBytes[128] = "";
     std::string m_patchStatus;
     PatchManager m_patchmgr;
+
+    // Detours
+    DetourManager m_detours;
+    char m_detourTarget[256] = "";
+    int m_caveUserBytes = 32;
+    uint64_t m_caveRecForInsn = 0; // which instruction m_caveUserBytes was auto-sized for
+    std::string m_detourStatus;
+
+    // Hex calculator
+    bool m_showCalc = false;
+    bool m_calcHex = true;
+    int m_calcOp = 0;
+    char m_calcA[40] = "0";
+    char m_calcB[40] = "0";
 };

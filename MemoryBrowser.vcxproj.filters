@@ -18,6 +18,8 @@
     <ClCompile Include="src\tracer.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="src\decompiler.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="src\patches.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\detour.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\glass.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="third_party\imgui\imgui.cpp"><Filter>imgui</Filter></ClCompile>
     <ClCompile Include="third_party\imgui\imgui_demo.cpp"><Filter>imgui</Filter></ClCompile>
     <ClCompile Include="third_party\imgui\imgui_draw.cpp"><Filter>imgui</Filter></ClCompile>
@@ -36,6 +38,8 @@
     <ClInclude Include="src\tracer.h"><Filter>src</Filter></ClInclude>
     <ClInclude Include="src\decompiler.h"><Filter>src</Filter></ClInclude>
     <ClInclude Include="src\patches.h"><Filter>src</Filter></ClInclude>
+    <ClInclude Include="src\detour.h"><Filter>src</Filter></ClInclude>
+    <ClInclude Include="src\glass.h"><Filter>src</Filter></ClInclude>
     <ClInclude Include="src\ui.h"><Filter>src</Filter></ClInclude>
     <ClInclude Include="third_party\imgui\imconfig.h"><Filter>imgui</Filter></ClInclude>
     <ClInclude Include="third_party\imgui\imgui.h"><Filter>imgui</Filter></ClInclude>

@@ -15,6 +15,7 @@ class HexView
 public:
     void Draw(const char* title, bool* open, Process& proc);
     void GoTo(uint64_t address, bool pushHistory = true);
+    void FocusEdit(uint64_t address, uint64_t selectLen); // byte-edit mode, cursor + region highlighted
     uint64_t Cursor() const { return m_cursor; }
 
     // Callback the host app installs so "Add to address list" works from here.
@@ -27,6 +28,8 @@ public:
 private:
     void DrawToolbar(Process& proc);
     void DrawBytes(Process& proc);
+    void DrawDisasm(Process& proc);
+    uint64_t PrevInstr(Process& proc, uint64_t addr);
     void DrawInspector(Process& proc);
     void DrawContextMenu(Process& proc);
     void HandleKeyboard(Process& proc, int visibleRows);
@@ -40,6 +43,7 @@ private:
     uint64_t m_cursor = 0;
     uint64_t m_selAnchor = 0;
     int m_bytesPerRow = 16;
+    bool m_disasm = false;
     int m_nibble = 0;
     bool m_asciiFocus = false;
     bool m_dragging = false;

@@ -1102,6 +1102,33 @@ bool DisassembleFunction(const Process& proc, uint64_t address, std::vector<Inst
     return true;
 }
 
+void DisassembleBytes(const std::vector<uint8_t>& bytes, uint64_t base, bool x64, std::vector<InstructionRow>& out)
+{
+    out.clear();
+    ZydisDecoder dec = MakeDecoder(x64);
+    ZydisFormatter fmt{};
+    ZydisFormatterInit(&fmt, ZYDIS_FORMATTER_STYLE_INTEL);
+    ZydisFormatterSetProperty(&fmt, ZYDIS_FORMATTER_PROP_FORCE_SIZE, ZYAN_TRUE);
+
+    size_t off = 0;
+    while (off < bytes.size())
+    {
+        ZydisDecodedInstruction ins{};
+        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT]{};
+        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec, bytes.data() + off, bytes.size() - off, &ins, ops))) break;
+
+        InstructionRow row;
+        row.address = base + off;
+        row.bytes.assign(bytes.begin() + off, bytes.begin() + off + ins.length);
+        char text[256];
+        if (ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&fmt, &ins, ops, ins.operand_count_visible, text,
+                                                         sizeof(text), base + off, nullptr)))
+            row.text = text;
+        out.push_back(row);
+        off += ins.length;
+    }
+}
+
 bool EncodeImmediate(const std::vector<uint8_t>& insnBytes, bool x64, uint64_t value,
                      std::vector<uint8_t>& encoded, std::string& error)
 {

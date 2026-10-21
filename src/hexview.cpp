@@ -3,6 +3,8 @@
 #include "imgui.h"
 #include "ui.h"
 
+#include <Zydis/Zydis.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -10,14 +12,14 @@
 
 namespace
 {
-const ImU32 kColAddr = IM_COL32(110, 140, 190, 255);
+const ImU32 kColAddr = IM_COL32(120, 140, 175, 255);
 const ImU32 kColByte = IM_COL32(220, 222, 228, 255);
 const ImU32 kColZero = IM_COL32(110, 112, 120, 255);
 const ImU32 kColInvalid = IM_COL32(80, 80, 88, 255);
-const ImU32 kColAscii = IM_COL32(180, 200, 160, 255);
-const ImU32 kColChanged = IM_COL32(255, 90, 80, 255);
-const ImU32 kColSel = IM_COL32(60, 100, 180, 110);
-const ImU32 kColCursor = IM_COL32(255, 200, 60, 255);
+const ImU32 kColAscii = IM_COL32(170, 185, 215, 255);
+const ImU32 kColChanged = IM_COL32(242, 148, 132, 255);
+const ImU32 kColSel = IM_COL32(143, 171, 219, 70);
+const ImU32 kColCursor = IM_COL32(199, 217, 247, 255);
 const ImU32 kColRowAlt = IM_COL32(255, 255, 255, 8);
 
 ImU32 LerpCol(ImU32 a, ImU32 b, float t)
@@ -45,6 +47,20 @@ void HexView::GoTo(uint64_t address, bool pushHistory)
     snprintf(m_addrInput, sizeof(m_addrInput), "%llX", (unsigned long long)address);
 }
 
+void HexView::FocusEdit(uint64_t address, uint64_t selectLen)
+{
+    m_disasm = false; // the hex grid is where you type bytes, so leave disassembly mode
+    GoTo(address);
+    // Highlight the editable span (e.g. a cave's free bytes) but keep the cursor on its
+    // first byte, so typing hex starts there and you can see how much room you have.
+    if (selectLen > 1)
+    {
+        m_cursor = address;
+        m_selAnchor = address + selectLen - 1;
+        m_nibble = 0;
+    }
+}
+
 void HexView::Draw(const char* title, bool* open, Process& proc)
 {
     if (!ImGui::Begin(title, open))
@@ -65,9 +81,11 @@ void HexView::Draw(const char* title, bool* open, Process& proc)
     float inspectorW = Px(290);
     float avail = ImGui::GetContentRegionAvail().x;
     bool showInspector = avail > inspectorW + Px(300);
+    if (m_disasm) showInspector = false;
     ImGui::BeginChild("##bytes", ImVec2(showInspector ? avail - inspectorW - 6.f : 0.f, 0), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav);
-    DrawBytes(proc);
+    if (m_disasm) DrawDisasm(proc);
+    else DrawBytes(proc);
     ImGui::EndChild();
     if (showInspector)
     {
@@ -125,11 +143,17 @@ void HexView::DrawToolbar(Process& proc)
         }
     }
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(Px(70));
+    ImGui::BeginDisabled(m_disasm);
+    ImGui::SetNextItemWidth(Px(84));
     const char* widths[] = { "8", "16", "32" };
     int wi = m_bytesPerRow == 8 ? 0 : m_bytesPerRow == 16 ? 1 : 2;
     if (ImGui::Combo("##bpr", &wi, widths, 3)) m_bytesPerRow = wi == 0 ? 8 : wi == 1 ? 16 : 32;
     ImGui::SetItemTooltip("Bytes per row");
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Disasm", &m_disasm) && m_disasm) m_top = m_cursor;
+    ImGui::SetItemTooltip("Show the bytes decoded as instructions");
 
     ImGui::SameLine();
     RegionInfo r;
@@ -418,8 +442,8 @@ void HexView::DrawBytes(Process& proc)
         {
             int i = (int)(m_cursor - rowAddr);
             float bx = byteX(i), ax = asciiX + i * cw;
-            ImU32 hexCol = m_asciiFocus ? IM_COL32(255, 200, 60, 90) : kColCursor;
-            ImU32 ascCol = m_asciiFocus ? kColCursor : IM_COL32(255, 200, 60, 90);
+            ImU32 hexCol = m_asciiFocus ? IM_COL32(199, 217, 247, 90) : kColCursor;
+            ImU32 ascCol = m_asciiFocus ? kColCursor : IM_COL32(199, 217, 247, 90);
             if (!m_asciiFocus && m_nibble == 1)
                 dl->AddRect(ImVec2(bx + cw - 1, y), ImVec2(bx + 2 * cw + 1, y + lh), hexCol);
             else
@@ -433,6 +457,142 @@ void HexView::DrawBytes(Process& proc)
     dl->AddLine(ImVec2(asciiX - cw * 0.75f, origin.y), ImVec2(asciiX - cw * 0.75f, origin.y + rows * lh), sepCol);
 
     if (monoFont) ImGui::PopFont();
+}
+
+uint64_t HexView::PrevInstr(Process& proc, uint64_t addr)
+{
+    // Find the instruction start closest below `addr` whose length lands exactly on it.
+    ZydisDecoder dec;
+    ZydisDecoderInit(&dec, proc.Is64() ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
+                     proc.Is64() ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
+    for (int back = 1; back <= 15; back++)
+    {
+        if (addr < (uint64_t)back) break;
+        uint64_t s = addr - back;
+        uint8_t buf[16];
+        if (proc.Read(s, buf, sizeof(buf)) == 0) continue;
+        ZydisDecodedInstruction ins;
+        if (ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&dec, nullptr, buf, sizeof(buf), &ins)) &&
+            s + ins.length == addr)
+            return s;
+    }
+    return addr > 0 ? addr - 1 : 0;
+}
+
+void HexView::DrawDisasm(Process& proc)
+{
+    if (monoFont) ImGui::PushFont(monoFont);
+    ImGuiIO& io = ImGui::GetIO();
+    const float lh = ImGui::GetTextLineHeightWithSpacing();
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const int rows = std::max(1, (int)(avail.y / lh));
+
+    // Note: the view scrolls freely with the wheel; the arrow-key handlers below keep the
+    // cursor on screen when you navigate, so m_top is deliberately not pinned to the cursor.
+
+    ZydisDecoder dec;
+    ZydisDecoderInit(&dec, proc.Is64() ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
+                     proc.Is64() ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
+    ZydisFormatter fmt;
+    ZydisFormatterInit(&fmt, ZYDIS_FORMATTER_STYLE_INTEL);
+    ZydisFormatterSetProperty(&fmt, ZYDIS_FORMATTER_PROP_FORCE_SIZE, ZYAN_TRUE);
+
+    uint64_t a = m_top;
+    size_t firstLen = 1;
+    uint64_t lastAddr = m_top;
+    uint64_t clicked = 0;
+    bool didClick = false;
+
+    for (int r = 0; r < rows; r++)
+    {
+        uint8_t buf[16];
+        size_t got = proc.Read(a, buf, sizeof(buf));
+        ZydisDecodedInstruction ins;
+        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+        bool ok = got > 0 && ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec, buf, got, &ins, ops));
+        int len = ok ? ins.length : 1;
+        if (r == 0) firstLen = (size_t)len;
+
+        char text[128] = "(unreadable)";
+        if (ok)
+            ZydisFormatterFormatInstruction(&fmt, &ins, ops, ins.operand_count_visible, text, sizeof(text), a, nullptr);
+
+        std::string bytes = BytesToHex(buf, (size_t)len);
+        if (bytes.size() < 23) bytes.resize(23, ' '); // ~7 bytes wide, so the text column lines up
+
+        char line[256];
+        snprintf(line, sizeof(line), "%-20s %s  %s", proc.Symbolize(a).c_str(), bytes.c_str(), ok ? text : "??");
+
+        ImGui::PushID((void*)(uintptr_t)a);
+        bool sel = (a == m_cursor);
+        if (ImGui::Selectable(line, sel, ImGuiSelectableFlags_SpanAllColumns)) { clicked = a; didClick = true; }
+        if (ImGui::BeginPopupContextItem("##dctx"))
+        {
+            m_cursor = m_selAnchor = a;
+            if (onDecompile && ImGui::MenuItem("Decompile this function")) onDecompile(a);
+            if (onFindAccess)
+            {
+                int sz = std::min((int)len, 8);
+                if (ImGui::MenuItem("Find what writes here")) onFindAccess(a, sz, TraceKind::Writes);
+                if (ImGui::MenuItem("Find what accesses here")) onFindAccess(a, sz, TraceKind::Accesses);
+            }
+            if (ImGui::MenuItem("Copy bytes")) ImGui::SetClipboardText(BytesToHex(buf, (size_t)len).c_str());
+            if (ImGui::MenuItem("Copy instruction")) ImGui::SetClipboardText(text);
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+
+        lastAddr = a;
+        a += len;
+    }
+
+    if (didClick)
+    {
+        m_cursor = m_selAnchor = clicked;
+        snprintf(m_addrInput, sizeof(m_addrInput), "%llX", (unsigned long long)clicked);
+    }
+
+    // Scroll with the wheel (a few instructions per notch).
+    if (ImGui::IsWindowHovered() && io.MouseWheel != 0.f)
+    {
+        int steps = 3;
+        if (io.MouseWheel > 0) // scroll up: back up whole instructions
+            for (int i = 0; i < steps; i++) m_top = PrevInstr(proc, m_top);
+        else // scroll down: advance past whole instructions
+            for (int i = 0; i < steps; i++)
+            {
+                uint8_t b[16];
+                if (proc.Read(m_top, b, sizeof(b)) == 0) break;
+                ZydisDecodedInstruction ins;
+                int len = ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&dec, nullptr, b, sizeof(b), &ins)) ? ins.length : 1;
+                m_top += len;
+            }
+    }
+
+    // Keyboard: step the cursor instruction by instruction.
+    if (ImGui::IsWindowFocused())
+    {
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+        {
+            uint8_t buf[16];
+            if (proc.Read(m_cursor, buf, sizeof(buf)))
+            {
+                ZydisDecodedInstruction ins;
+                int len = ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&dec, nullptr, buf, sizeof(buf), &ins)) ? ins.length : 1;
+                m_cursor += len;
+            }
+            if (m_cursor > lastAddr) m_top = PrevInstr(proc, PrevInstr(proc, m_cursor));
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+        {
+            m_cursor = PrevInstr(proc, m_cursor);
+            if (m_cursor < m_top) m_top = m_cursor;
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_G)) m_focusAddress = true;
+    }
+
+    if (monoFont) ImGui::PopFont();
+    (void)firstLen;
 }
 
 void HexView::DrawContextMenu(Process& proc)

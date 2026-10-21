@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include "decompiler.h"
+#include "glass.h"
 #include "imgui.h"
 #include "ui.h"
 #include "imgui_internal.h"
@@ -29,10 +30,11 @@ const char* kWinModules = "Modules";
 const char* kWinLog = "Log";
 const char* kWinDecompile = "Decompile";
 
-const ImVec4 kColErr(1.0f, 0.42f, 0.42f, 1.0f);
-const ImVec4 kColOk(0.45f, 0.85f, 0.55f, 1.0f);
-const ImVec4 kColChanged(1.0f, 0.38f, 0.32f, 1.0f);
-const ImVec4 kColAccent(0.40f, 0.62f, 1.0f, 1.0f);
+// Status colours stay distinguishable but are muted to sit in the duotone palette.
+const ImVec4 kColErr(0.93f, 0.55f, 0.58f, 1.0f);
+const ImVec4 kColOk(0.62f, 0.84f, 0.78f, 1.0f);
+const ImVec4 kColChanged(0.95f, 0.58f, 0.52f, 1.0f);
+const ImVec4 kColAccent = Glass::kAccentHi;
 
 std::string Lower(std::string s)
 {
@@ -158,6 +160,16 @@ void App::Detach()
     m_tracer.Shutdown();
     m_traces.clear();
     m_patches.clear();
+    // Undo detours and free their caves while we still have the handle.
+    if (m_proc.IsOpen() && m_proc.IsAlive())
+    {
+        std::vector<uint64_t> es;
+        for (const auto& d : m_detours.All()) es.push_back(d.entry);
+        for (uint64_t e : es) m_detours.Remove(m_proc, e);
+    }
+    m_detours.Clear();
+    m_patchmgr.Clear();
+    m_instructions.clear();
     m_proc.Close();
     m_scanner.Reset();
     m_regions.clear();
@@ -224,10 +236,14 @@ void App::Frame()
     ImGuiIO& io = ImGui::GetIO();
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) m_openPicker = true;
 
+    Glass::DrawBackdrop();
     DrawMenuBar();
     DrawStatusBar();
 
+    // The dockspace host stays clear so the backdrop shows between docked panes.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
     ImGuiID dock = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+    ImGui::PopStyleColor();
     if (!m_layoutInit)
     {
         m_layoutInit = true;
@@ -245,9 +261,11 @@ void App::Frame()
     if (m_showLog) DrawLog();
     if (m_showAbout) DrawAbout();
     if (m_showDecompile) DrawDecompile();
+    if (m_showCalc) DrawCalculator();
     DrawTraceWindows();
     DrawProcessPicker();
     DrawEditValuePopup();
+    Glass::DecorateWindows();
 }
 
 void App::SetupDefaultLayout(unsigned int id)
@@ -326,19 +344,43 @@ void App::DrawMenuBar()
         }
         ImGui::EndMenu();
     }
+    if (ImGui::MenuItem("Calculator")) m_showCalc = true;
     if (ImGui::BeginMenu("Help"))
     {
         ImGui::MenuItem("Expressions & shortcuts", nullptr, &m_showAbout);
         ImGui::EndMenu();
     }
 
-    // Quick attach button on the right of the menu bar.
+    // Quick attach pill on the right of the menu bar, with a status light that pulses while attached.
     const char* label = m_proc.IsOpen() ? m_proc.Name().c_str() : "No process";
-    float w = ImGui::CalcTextSize(label).x + Px(60);
+    const float dotGap = Px(22);
+    float w = ImGui::CalcTextSize(label).x + dotGap + Px(44);
     ImGui::SetCursorPosX(ImGui::GetWindowWidth() - w);
-    ImGui::PushStyleColor(ImGuiCol_Text, m_proc.IsOpen() ? kColOk : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    if (ImGui::Selectable(label, false, 0, ImVec2(w - Px(16), 0))) m_openPicker = true;
-    ImGui::PopStyleColor();
+    ImVec2 pill0 = ImGui::GetCursorScreenPos();
+    ImVec2 pillSize(w - Px(16), ImGui::GetFrameHeight() - Px(4));
+    pill0.y = ImGui::GetWindowPos().y + (ImGui::GetWindowHeight() - pillSize.y) * 0.5f;
+    ImVec2 pill1(pill0.x + pillSize.x, pill0.y + pillSize.y);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(pill0, pill1, IM_COL32(255, 255, 255, 14), pillSize.y * 0.5f);
+    dl->AddRect(pill0, pill1, IM_COL32(255, 255, 255, 34), pillSize.y * 0.5f);
+    ImVec2 dot(pill0.x + Px(14), (pill0.y + pill1.y) * 0.5f);
+    ImVec4 dotCol = m_proc.IsOpen() ? kColOk : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+    if (m_proc.IsOpen())
+    {
+        float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 2.4f);
+        Glass::Glow(dl, dot, Px(9 + 3 * pulse), ImVec4(dotCol.x, dotCol.y, dotCol.z, 0.35f + 0.25f * pulse));
+    }
+    dl->AddCircleFilled(dot, Px(3.5f), ImGui::ColorConvertFloat4ToU32(dotCol));
+
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + dotGap);
+    ImGui::PushStyleColor(ImGuiCol_Text, m_proc.IsOpen() ? ImGui::GetStyleColorVec4(ImGuiCol_Text)
+                                                         : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0, 0, 0, 0));
+    if (ImGui::Selectable(label, false, 0, ImVec2(w - dotGap - Px(28), 0))) m_openPicker = true;
+    bool pillHovered = ImGui::IsItemHovered();
+    ImGui::PopStyleColor(3);
+    if (pillHovered) dl->AddRect(pill0, pill1, ImGui::GetColorU32(ImGuiCol_SliderGrab), pillSize.y * 0.5f, 0, 1.5f);
     ImGui::SetItemTooltip("Click to choose a process (Ctrl+O)");
     ImGui::EndMainMenuBar();
 }
@@ -583,45 +625,59 @@ void App::DrawScanner()
     if (ImGui::CollapsingHeader("Memory scan options", ImGuiTreeNodeFlags_DefaultOpen))
     {
         ImGui::BeginDisabled(hasResults);
-        ImGui::Checkbox("Writable only", &m_opts.requireWritable);
-        ImGui::SameLine(Px(180));
-        ImGui::Checkbox("Include executable", &m_opts.includeExecutable);
-        ImGui::Checkbox("Image", &m_opts.includeImage);
-        ImGui::SetItemTooltip("Memory backed by loaded modules (.exe/.dll sections)");
-        ImGui::SameLine(Px(90));
-        ImGui::Checkbox("Private", &m_opts.includePrivate);
-        ImGui::SetItemTooltip("Heap / stack / VirtualAlloc memory");
-        ImGui::SameLine(Px(180));
-        ImGui::Checkbox("Mapped", &m_opts.includeMapped);
-        ImGui::SetItemTooltip("File mappings and shared sections");
+        // Region checkboxes in a three-column grid sized from the panel, so labels never collide.
+        if (ImGui::BeginTable("##regionkinds", 3, ImGuiTableFlags_SizingStretchSame))
+        {
+            ImGui::TableNextColumn();
+            ImGui::Checkbox("Writable only", &m_opts.requireWritable);
+            ImGui::TableNextColumn();
+            ImGui::Checkbox("Include executable", &m_opts.includeExecutable);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Checkbox("Image", &m_opts.includeImage);
+            ImGui::SetItemTooltip("Memory backed by loaded modules (.exe/.dll sections)");
+            ImGui::TableNextColumn();
+            ImGui::Checkbox("Private", &m_opts.includePrivate);
+            ImGui::SetItemTooltip("Heap / stack / VirtualAlloc memory");
+            ImGui::TableNextColumn();
+            ImGui::Checkbox("Mapped", &m_opts.includeMapped);
+            ImGui::SetItemTooltip("File mappings and shared sections");
+            ImGui::EndTable();
+        }
 
         if (IsNumeric(m_opts.type))
         {
             ImGui::Checkbox("Fast scan, alignment", &m_opts.fastScan);
             ImGui::SameLine();
             ImGui::BeginDisabled(!m_opts.fastScan);
-            ImGui::SetNextItemWidth(Px(80));
+            ImGui::SetNextItemWidth(StepperWidth(40));
             ImGui::InputInt("##align", &m_opts.alignment, 1, 4);
             m_opts.alignment = std::clamp(m_opts.alignment, 1, 64);
             ImGui::EndDisabled();
         }
 
+        // Start [....] Stop [....] [All]: the two address fields share whatever width is left.
+        const ImGuiStyle& st = ImGui::GetStyle();
+        float allW = ImGui::CalcTextSize("All").x + st.FramePadding.x * 2;
+        float fieldW = (ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Start").x - ImGui::CalcTextSize("Stop").x -
+                        allW - st.ItemSpacing.x * 4) / 2.f;
+        fieldW = std::max(fieldW, Px(90));
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Start");
-        ImGui::SameLine(Px(50));
-        ImGui::SetNextItemWidth(Px(150));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fieldW);
         if (m_mono) ImGui::PushFont(m_mono);
         ImGui::InputText("##rs", m_rangeStart, sizeof(m_rangeStart), ImGuiInputTextFlags_CharsHexadecimal);
         if (m_mono) ImGui::PopFont();
         ImGui::SameLine();
         ImGui::TextUnformatted("Stop");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(Px(150));
+        ImGui::SetNextItemWidth(fieldW);
         if (m_mono) ImGui::PushFont(m_mono);
         ImGui::InputText("##re", m_rangeEnd, sizeof(m_rangeEnd), ImGuiInputTextFlags_CharsHexadecimal);
         if (m_mono) ImGui::PopFont();
         ImGui::SameLine();
-        if (ImGui::SmallButton("All"))
+        if (ImGui::Button("All", ImVec2(allW, 0)))
         {
             snprintf(m_rangeStart, sizeof(m_rangeStart), "0");
             snprintf(m_rangeEnd, sizeof(m_rangeEnd), "%llX", (unsigned long long)m_proc.MaxAddress());
@@ -949,7 +1005,7 @@ void App::DrawAddressList()
                 if (ValueTypeSize(w.type) == 0)
                 {
                     ImGui::Separator();
-                    ImGui::SetNextItemWidth(Px(100));
+                    ImGui::SetNextItemWidth(StepperWidth(50));
                     ImGui::InputInt("Length", &w.length);
                     w.length = std::clamp(w.length, 1, 4096);
                 }
@@ -1750,7 +1806,7 @@ void App::DrawActivePatches()
         ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, Px(30));
         ImGui::TableSetupColumn("Location", ImGuiTableColumnFlags_WidthFixed, Px(190));
         ImGui::TableSetupColumn("Change", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, Px(70));
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, SmallButtonWidth("Remove"));
         ImGui::TableHeadersRow();
 
         uint64_t toRemove = 0;
@@ -1826,8 +1882,353 @@ void App::DrawDecompile()
             DrawActivePatches();
             ImGui::EndTabItem();
         }
+        const char* detourTab = m_detours.Empty() ? "Detours" : "Detours *";
+        if (ImGui::BeginTabItem(detourTab))
+        {
+            DrawDetours();
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
     }
+    ImGui::End();
+}
+
+int App::RecommendCaveBytes() const
+{
+    const size_t jsz = m_proc.Is64() ? 14 : 5; // bytes stolen for the entry jump
+
+    size_t idx = (size_t)-1;
+    for (size_t i = 0; i < m_instructions.size(); i++)
+        if (m_instructions[i].address == m_selectedInsn) { idx = i; break; }
+    if (idx == (size_t)-1) return 32;
+
+    // How many whole instructions get stolen (and thus relocated) into the cave.
+    size_t stolen = 0;
+    for (size_t i = idx; i < m_instructions.size() && stolen < jsz; i++)
+        stolen += m_instructions[i].bytes.size();
+    if (stolen < jsz) stolen = jsz;
+
+    // Free room for your own code: enough to reproduce the stolen logic plus headroom,
+    // rounded up to 16 so the number stays tidy.
+    size_t rec = stolen + 32;
+    rec = (rec + 15) & ~size_t(15);
+    return (int)rec;
+}
+
+void App::DrawDetours()
+{
+    if (!m_proc.IsOpen())
+    {
+        ImGui::TextDisabled("Attach to a process first.");
+        return;
+    }
+
+    // Install controls operate on the instruction selected in the Disassembly tab.
+    const InstructionRow* sel = nullptr;
+    for (const auto& r : m_instructions)
+        if (r.address == m_selectedInsn) sel = &r;
+
+    // Pre-fill the cave's free-byte count with a size suggestion when the selection
+    // changes; the user can still override it with the stepper afterwards.
+    if (sel && m_caveRecForInsn != sel->address)
+    {
+        m_caveUserBytes = RecommendCaveBytes();
+        m_caveRecForInsn = sel->address;
+    }
+
+    ImGui::TextDisabled("A detour redirects a function's entry. Pick the entry in the Disassembly tab.");
+    if (sel)
+    {
+        if (m_mono) ImGui::PushFont(m_mono);
+        ImGui::TextColored(kColAccent, "entry %s", m_proc.Symbolize(sel->address).c_str());
+        ImGui::SameLine();
+        ImGui::TextUnformatted(sel->text.c_str());
+        if (m_mono) ImGui::PopFont();
+
+        bool already = m_detours.Find(sel->address) != nullptr;
+        ImGui::BeginDisabled(already);
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("redirect to");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(Px(200));
+        ImGui::InputText("##dtarget", m_detourTarget, sizeof(m_detourTarget));
+        ImGui::SetItemTooltip("Address expression, e.g. game.exe+1F00 or another function.");
+        ImGui::SameLine();
+        if (ImGui::Button("Redirect"))
+        {
+            uint64_t target = 0;
+            std::string e;
+            if (!EvaluateAddress(m_proc, m_detourTarget, target, &e)) m_detourStatus = "Target: " + e;
+            else if (!m_detours.Redirect(m_proc, sel->address, target, e)) m_detourStatus = e;
+            else
+            {
+                m_detourStatus = "Redirected " + m_proc.Symbolize(sel->address) + " to " + m_proc.Symbolize(target);
+                Log(m_detourStatus);
+                RunDecompile();
+            }
+        }
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("or trampoline cave with");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(StepperWidth(50));
+        ImGui::InputInt("##cavebytes", &m_caveUserBytes);
+        if (m_caveUserBytes < 0) m_caveUserBytes = 0;
+        if (m_caveUserBytes > 4096) m_caveUserBytes = 4096;
+        ImGui::SameLine();
+        int rec = RecommendCaveBytes();
+        ImGui::TextDisabled("free bytes (rec %d)", rec);
+        if (m_caveUserBytes != rec)
+        {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset")) m_caveUserBytes = rec;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Install cave"))
+        {
+            std::string e;
+            if (!m_detours.InstallTrampoline(m_proc, sel->address, (size_t)m_caveUserBytes, e)) m_detourStatus = e;
+            else
+            {
+                const Detour* d = m_detours.Find(sel->address);
+                m_detourStatus = "Cave at " + ToHex(d ? d->cave : 0) + " - original runs; edit the cave to add code.";
+                Log("Installed trampoline on " + m_proc.Symbolize(sel->address));
+                RunDecompile();
+            }
+        }
+        ImGui::SetItemTooltip("Allocates a code cave: [your bytes][stolen instructions][jump back].\n"
+                              "Free bytes defaults to a size for this instruction; raise it if you\n"
+                              "need more room. The original still runs - edit the cave in the Memory View.");
+        ImGui::EndDisabled();
+        if (already) ImGui::TextDisabled("This entry is already detoured - see the list below.");
+    }
+    else ImGui::TextDisabled("No instruction selected.");
+
+    if (!m_detourStatus.empty()) ImGui::TextColored(kColAccent, "%s", m_detourStatus.c_str());
+
+    ImGui::Separator();
+    if (m_detours.Empty())
+    {
+        ImGui::TextDisabled("No detours installed.");
+        return;
+    }
+
+    if (ImGui::Button("Disable all")) { m_detours.RestoreAll(m_proc); RunDecompile(); }
+    ImGui::SameLine();
+    if (ImGui::Button("Remove all"))
+    {
+        std::vector<uint64_t> es;
+        for (const auto& d : m_detours.All()) es.push_back(d.entry);
+        for (uint64_t e : es) m_detours.Remove(m_proc, e);
+        RunDecompile();
+    }
+
+    ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
+    if (ImGui::BeginTable("##detours", 5, tf))
+    {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, Px(30));
+        ImGui::TableSetupColumn("Entry", ImGuiTableColumnFlags_WidthFixed, Px(170));
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, Px(90));
+        ImGui::TableSetupColumn("Target / cave", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed,
+                                SmallButtonWidth("Edit cave") + ImGui::GetStyle().ItemSpacing.x + SmallButtonWidth("Remove"));
+        ImGui::TableHeadersRow();
+
+        uint64_t toRemove = 0;
+        bool remove = false;
+        for (const auto& d : m_detours.All())
+        {
+            ImGui::TableNextRow();
+            ImGui::PushID((void*)(uintptr_t)d.entry);
+            ImGui::TableNextColumn();
+            bool on = d.enabled;
+            if (ImGui::Checkbox("##on", &on)) m_detours.SetEnabled(m_proc, d.entry, on);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(d.location.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(d.kind.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(m_proc.Symbolize(d.target).c_str());
+            ImGui::TableNextColumn();
+            if (d.cave)
+            {
+                if (ImGui::SmallButton("Edit cave"))
+                {
+                    m_hex.FocusEdit(d.cave, d.caveUserSize);
+                    m_showHex = true;
+                    ImGui::SetWindowFocus(kWinHex);
+                }
+                ImGui::SetItemTooltip("Jumps to the cave's free bytes (the highlighted NOP block) in the Memory View.\n"
+                                      "Type hex there to add your code; the stolen instructions run right after it.");
+                ImGui::SameLine();
+            }
+            if (ImGui::SmallButton("Remove")) { toRemove = d.entry; remove = true; }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+        if (remove) { m_detours.Remove(m_proc, toRemove); RunDecompile(); }
+    }
+
+    // Reference: the instructions each cave stole from its entry, so you can rebuild the
+    // original behaviour in the cave (or just see what you're replacing) while you edit.
+    bool anyCave = false;
+    for (const auto& d : m_detours.All())
+        if (d.cave) { anyCave = true; break; }
+    if (anyCave)
+    {
+        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Original code (before cave)", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::TextDisabled("What the entry ran before the detour. Your cave's free bytes start as NOPs -\n"
+                                "write your new version here, using this as the reference.");
+            for (const auto& d : m_detours.All())
+            {
+                if (!d.cave) continue;
+                ImGui::PushID((void*)(uintptr_t)d.entry);
+                ImGui::SeparatorText(m_proc.Symbolize(d.entry).c_str());
+
+                std::vector<InstructionRow> rows;
+                DisassembleBytes(d.original, d.entry, m_proc.Is64(), rows);
+                if (m_mono) ImGui::PushFont(m_mono);
+                for (const auto& r : rows)
+                {
+                    std::string hex = BytesToHex(r.bytes.data(), r.bytes.size());
+                    ImGui::Text("%-18s %-21s %s", m_proc.Symbolize(r.address).c_str(), hex.c_str(), r.text.c_str());
+                }
+                if (m_mono) ImGui::PopFont();
+
+                if (ImGui::SmallButton("Copy original bytes"))
+                    ImGui::SetClipboardText(BytesToHex(d.original.data(), d.original.size()).c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled("cave %s  |  %zu free bytes", ToHex(d.cave).c_str(), d.caveUserSize);
+                ImGui::PopID();
+            }
+        }
+    }
+}
+
+void App::DrawCalculator()
+{
+    ImGui::SetNextWindowSize(ImVec2(Px(440), Px(330)), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Calculator", &m_showCalc))
+    {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Checkbox("Hex input", &m_calcHex);
+    ImGui::SameLine();
+    ImGui::TextDisabled(m_calcHex ? "typing 1C = 0x1C; prefix with 0n for decimal" : "typing 28 = decimal; prefix 0x for hex");
+
+    // Parse A/B honouring the hex-input toggle. 0x forces hex, 0n forces decimal, '-' negates.
+    auto parse = [&](const char* s, uint64_t& v) -> bool {
+        std::string t = s;
+        size_t a = t.find_first_not_of(" \t");
+        if (a == std::string::npos) return false;
+        t = t.substr(a, t.find_last_not_of(" \t") - a + 1);
+        bool neg = t[0] == '-';
+        if (neg) t = t.substr(1);
+        int base = m_calcHex ? 16 : 10;
+        if (t.rfind("0x", 0) == 0 || t.rfind("0X", 0) == 0) { base = 16; t = t.substr(2); }
+        else if (t.rfind("0n", 0) == 0 || t.rfind("0N", 0) == 0) { base = 10; t = t.substr(2); }
+        if (t.empty()) return false;
+        char* end = nullptr;
+        errno = 0;
+        unsigned long long u = strtoull(t.c_str(), &end, base);
+        if (end == t.c_str() || *end != '\0' || errno != 0) return false;
+        v = neg ? (uint64_t)(-(int64_t)u) : u;
+        return true;
+    };
+
+    ImGui::SetNextItemWidth(Px(170));
+    ImGui::InputText("A", m_calcA, sizeof(m_calcA));
+    const char* ops[] = { "A + B", "A - B", "A * B", "A / B", "A AND B", "A OR B", "A XOR B", "A << B", "A >> B", "~A" };
+    ImGui::SetNextItemWidth(Px(120));
+    ImGui::Combo("op", &m_calcOp, ops, IM_ARRAYSIZE(ops));
+    bool unary = m_calcOp == 9;
+    ImGui::BeginDisabled(unary);
+    ImGui::SetNextItemWidth(Px(170));
+    ImGui::InputText("B", m_calcB, sizeof(m_calcB));
+    ImGui::EndDisabled();
+
+    uint64_t a = 0, b = 0;
+    bool okA = parse(m_calcA, a);
+    bool okB = unary ? true : parse(m_calcB, b);
+    ImGui::Separator();
+    if (!okA || !okB)
+    {
+        ImGui::TextColored(kColErr, "Enter valid numbers.");
+        ImGui::End();
+        return;
+    }
+
+    uint64_t r = 0;
+    switch (m_calcOp)
+    {
+    case 0: r = a + b; break;
+    case 1: r = a - b; break;
+    case 2: r = a * b; break;
+    case 3:
+        if (b == 0) { ImGui::TextColored(kColErr, "Divide by zero."); ImGui::End(); return; }
+        r = a / b;
+        break;
+    case 4: r = a & b; break;
+    case 5: r = a | b; break;
+    case 6: r = a ^ b; break;
+    case 7: r = a << (b & 63); break;
+    case 8: r = a >> (b & 63); break;
+    case 9: r = ~a; break;
+    }
+
+    // Smallest natural width that holds the result, for the little-endian byte view.
+    int width = 1;
+    if (r > 0xFFFFFFFFull) width = 8;
+    else if (r > 0xFFFFull) width = 4;
+    else if (r > 0xFFull) width = 2;
+
+    // Label | value | Copy, with every Copy button lined up on the right edge.
+    const float copyW = ImGui::CalcTextSize("Copy").x + ImGui::GetStyle().FramePadding.x * 2;
+    auto row = [&](const char* label, const std::string& value) {
+        ImGui::TextDisabled("%-10s", label);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(value.c_str());
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetContentRegionMax().x - copyW));
+        ImGui::SmallButton((std::string("Copy##") + label).c_str());
+        if (ImGui::IsItemClicked()) ImGui::SetClipboardText(value.c_str());
+    };
+
+    char hexs[32];
+    snprintf(hexs, sizeof(hexs), "0x%llX", (unsigned long long)r);
+    std::string bytesLE;
+    for (int i = 0; i < width; i++)
+    {
+        char bb[4];
+        snprintf(bb, sizeof(bb), "%02X ", (unsigned)((r >> (i * 8)) & 0xFF));
+        bytesLE += bb;
+    }
+    if (!bytesLE.empty()) bytesLE.pop_back();
+
+    std::string bin;
+    int topBit = 0;
+    for (int i = 63; i >= 0; i--)
+        if (r & (1ull << i)) { topBit = i; break; }
+    for (int i = topBit; i >= 0; i--)
+    {
+        bin += (r & (1ull << i)) ? '1' : '0';
+        if (i && i % 4 == 0) bin += ' ';
+    }
+    if (bin.empty()) bin = "0";
+
+    if (m_mono) ImGui::PushFont(m_mono);
+    row("hex", hexs);
+    row("unsigned", std::to_string((unsigned long long)r));
+    row("signed", std::to_string((long long)r));
+    row("bytes LE", bytesLE);
+    row("binary", bin);
+    if (m_mono) ImGui::PopFont();
+
     ImGui::End();
 }
 
