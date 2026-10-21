@@ -39,6 +39,12 @@ public:
     // how many editable NOP bytes to reserve at the start of the cave for your own code.
     bool InstallTrampoline(const Process& proc, uint64_t entry, size_t userBytes, std::string& error);
 
+    // Replaces the instruction at `addr` with `newInsn` when it doesn't fit in place: installs a
+    // jump into a fresh cave holding [newInsn][the other stolen instructions][jump back], so a
+    // larger instruction has room. RIP-relative operands in the new and stolen bytes are fixed up.
+    bool ReplaceInstruction(const Process& proc, uint64_t addr, const std::vector<uint8_t>& newInsn,
+                            std::string& error);
+
     // Rewrites the stolen immediate instruction (e.g. an `add [gold], 25`) in the cave with a new
     // value, letting it grow past the original immediate width. The widened instruction goes in the
     // cave's free bytes and the stolen copy of it is NOP'd, so the new value takes effect.

@@ -302,6 +302,78 @@ bool DetourManager::InstallTrampoline(const Process& proc, uint64_t entry, size_
     return true;
 }
 
+bool DetourManager::ReplaceInstruction(const Process& proc, uint64_t addr, const std::vector<uint8_t>& newInsn,
+                                       std::string& error)
+{
+    if (!proc.IsOpen()) { error = "No process attached"; return false; }
+    if (newInsn.empty()) { error = "Nothing to assemble"; return false; }
+    if (Find(addr)) { error = "This address is already detoured. Remove it first."; return false; }
+
+    const bool x64 = proc.Is64();
+    const size_t jsz = JumpSize(x64);
+
+    // Length of the instruction we're replacing.
+    ZydisDecoder dec;
+    ZydisDecoderInit(&dec, x64 ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
+                     x64 ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
+    uint8_t cb[32];
+    size_t cg = proc.Read(addr, cb, sizeof(cb));
+    ZydisDecodedInstruction ci;
+    if (cg == 0 || !ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&dec, nullptr, cb, cg, &ci)))
+    { error = "Could not decode the instruction to replace."; return false; }
+    const size_t replLen = ci.length;
+
+    // Steal whole instructions to make room for the jump, keep the originals to restore.
+    size_t stolen = 0;
+    if (!StealLength(proc, addr, jsz, stolen, error)) return false;
+    std::vector<uint8_t> original(stolen);
+    if (!proc.ReadExact(addr, original.data(), original.size()))
+    { error = "Could not read the original bytes at " + Hex(addr); return false; }
+
+    // The instructions the jump clobbers after the one we're replacing must still run.
+    std::vector<uint8_t> remaining(original.begin() + replLen, original.end());
+
+    const size_t caveSize = newInsn.size() + remaining.size() + jsz;
+    LPVOID cave = AllocNear(proc.Handle(), addr, caveSize);
+    if (!cave) cave = VirtualAllocEx(proc.Handle(), nullptr, caveSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!cave) { error = "Could not allocate a cave for the larger instruction."; return false; }
+    const uint64_t caveAddr = (uint64_t)cave;
+
+    // cave = [new instruction][remaining stolen instructions][jump back], all RIP-fixed.
+    std::vector<uint8_t> n = newInsn;
+    if (!RelocateStolen(x64, addr, caveAddr, n, error)) { VirtualFreeEx(proc.Handle(), cave, 0, MEM_RELEASE); return false; }
+    std::vector<uint8_t> rem = remaining;
+    if (!RelocateStolen(x64, addr + replLen, caveAddr + n.size(), rem, error))
+    { VirtualFreeEx(proc.Handle(), cave, 0, MEM_RELEASE); return false; }
+
+    std::vector<uint8_t> caveBytes;
+    caveBytes.insert(caveBytes.end(), n.begin(), n.end());
+    caveBytes.insert(caveBytes.end(), rem.begin(), rem.end());
+    std::vector<uint8_t> back = MakeJump(caveAddr + n.size() + rem.size(), addr + stolen, x64);
+    caveBytes.insert(caveBytes.end(), back.begin(), back.end());
+    if (!proc.Write(caveAddr, caveBytes.data(), caveBytes.size()))
+    { error = "Could not write the cave."; VirtualFreeEx(proc.Handle(), cave, 0, MEM_RELEASE); return false; }
+
+    std::vector<uint8_t> hook = MakeJump(addr, caveAddr, x64);
+    hook.resize(stolen, 0x90);
+    if (!proc.Write(addr, hook.data(), hook.size()))
+    { error = "Write failed at " + Hex(addr) + " (page protected?)"; VirtualFreeEx(proc.Handle(), cave, 0, MEM_RELEASE); return false; }
+
+    Detour d;
+    d.entry = addr;
+    d.original = original;
+    d.hook = hook;
+    d.target = caveAddr;
+    d.cave = caveAddr;
+    d.caveSize = caveSize;
+    d.caveUserSize = newInsn.size();
+    d.stolenLen = stolen;
+    d.kind = "assemble";
+    d.location = proc.Symbolize(addr);
+    m_detours.push_back(std::move(d));
+    return true;
+}
+
 bool DetourManager::SetCaveImmediate(const Process& proc, uint64_t entry, uint64_t value, std::string& error)
 {
     if (!proc.IsOpen()) { error = "No process attached"; return false; }

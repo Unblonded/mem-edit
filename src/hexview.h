@@ -23,12 +23,16 @@ public:
     std::function<void(const std::string&)> onLog;
     std::function<void(uint64_t, int, TraceKind)> onFindAccess;
     std::function<void(uint64_t)> onDecompile;
+    // Install a larger assembled instruction via a trampoline cave (returns false + a reason on
+    // failure, a short status on success). Set by the host; when unset, growth overwrites in place.
+    std::function<bool(uint64_t, const std::vector<uint8_t>&, std::string&)> onAssembleHook;
     ImFont* monoFont = nullptr;
 
 private:
     void DrawToolbar(Process& proc);
     void DrawBytes(Process& proc);
     void DrawDisasm(Process& proc);
+    void DrawOpcodeLegend();
     uint64_t PrevInstr(Process& proc, uint64_t addr);
     void DrawInspector(Process& proc);
     void DrawContextMenu(Process& proc);
@@ -44,6 +48,9 @@ private:
     uint64_t m_selAnchor = 0;
     int m_bytesPerRow = 16;
     bool m_disasm = false;
+    bool m_showLegend = false;
+    char m_asmInput[128] = "";
+    std::string m_asmStatus;
     int m_nibble = 0;
     bool m_asciiFocus = false;
     bool m_dragging = false;

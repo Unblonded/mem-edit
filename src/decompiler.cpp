@@ -7,8 +7,11 @@
 #include <climits>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
+#include <sstream>
+#include <unordered_map>
 #include <set>
 #include <string>
 #include <vector>
@@ -1190,6 +1193,261 @@ bool EncodeImmediate(const std::vector<uint8_t>& insnBytes, bool x64, uint64_t v
 
     encoded.assign(enc, enc + len);
     encoded.resize(insnBytes.size(), 0x90); // pad a shorter encoding with NOPs
+    return true;
+}
+
+namespace
+{
+std::string Lower(std::string s)
+{
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+std::string Trim(const std::string& s)
+{
+    size_t a = s.find_first_not_of(" \t");
+    size_t b = s.find_last_not_of(" \t");
+    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+
+const std::unordered_map<std::string, ZydisMnemonic>& MnemonicMap()
+{
+    static std::unordered_map<std::string, ZydisMnemonic> m = [] {
+        std::unordered_map<std::string, ZydisMnemonic> r;
+        for (int i = 1; i <= ZYDIS_MNEMONIC_MAX_VALUE; i++)
+        {
+            const char* s = ZydisMnemonicGetString((ZydisMnemonic)i);
+            if (s) r[s] = (ZydisMnemonic)i;
+        }
+        return r;
+    }();
+    return m;
+}
+
+const std::unordered_map<std::string, ZydisRegister>& RegisterMap()
+{
+    static std::unordered_map<std::string, ZydisRegister> m = [] {
+        std::unordered_map<std::string, ZydisRegister> r;
+        for (int i = 1; i <= ZYDIS_REGISTER_MAX_VALUE; i++)
+        {
+            const char* s = ZydisRegisterGetString((ZydisRegister)i);
+            if (s) r[s] = (ZydisRegister)i;
+        }
+        return r;
+    }();
+    return m;
+}
+
+// Parse a signed number: 0x.. hex, otherwise decimal. Leading '-' allowed.
+bool ParseNum(const std::string& in, int64_t& out)
+{
+    std::string s = Trim(in);
+    if (s.empty()) return false;
+    bool neg = false;
+    size_t i = 0;
+    if (s[0] == '-') { neg = true; i = 1; }
+    else if (s[0] == '+') i = 1;
+    int base = 10;
+    if (s.size() >= i + 2 && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) { base = 16; i += 2; }
+    if (i >= s.size()) return false;
+    char* end = nullptr;
+    errno = 0;
+    uint64_t v = strtoull(s.c_str() + i, &end, base);
+    if (errno || end == s.c_str() + i || *end != '\0') return false;
+    out = neg ? -(int64_t)v : (int64_t)v;
+    return true;
+}
+
+// Split "a, b, c" at top-level commas (none are nested here, but keep it simple).
+std::vector<std::string> SplitOps(const std::string& s)
+{
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s)
+    {
+        if (c == ',') { out.push_back(Trim(cur)); cur.clear(); }
+        else cur += c;
+    }
+    std::string last = Trim(cur);
+    if (!last.empty()) out.push_back(last);
+    return out;
+}
+
+struct ParsedMem
+{
+    bool absolute = false; // [0x...] with no register -> encode RIP-relative to reach it
+    uint64_t absTarget = 0;
+    ZydisRegister base = ZYDIS_REGISTER_NONE;
+    ZydisRegister index = ZYDIS_REGISTER_NONE;
+    uint8_t scale = 0;
+    int64_t disp = 0;
+    uint16_t size = 0; // bytes, from a size hint
+};
+
+bool ParseMem(const std::string& opIn, ParsedMem& m, std::string& error)
+{
+    std::string op = Lower(Trim(opIn));
+    // size hint: "<sz> ptr [ ... ]"
+    struct { const char* w; uint16_t n; } hints[] = { { "byte", 1 },  { "word", 2 },      { "dword", 4 },
+                                                      { "qword", 8 }, { "xmmword", 16 },  { "tbyte", 10 } };
+    for (auto& h : hints)
+    {
+        std::string pfx = std::string(h.w) + " ptr";
+        if (op.rfind(pfx, 0) == 0) { m.size = h.n; op = Trim(op.substr(pfx.size())); break; }
+        std::string pfx2 = std::string(h.w) + "ptr";
+        if (op.rfind(pfx2, 0) == 0) { m.size = h.n; op = Trim(op.substr(pfx2.size())); break; }
+    }
+    if (op.size() < 2 || op.front() != '[' || op.back() != ']') { error = "bad memory operand: " + opIn; return false; }
+    std::string inner = Trim(op.substr(1, op.size() - 2));
+
+    // Split on '+' into terms; each term is reg, reg*scale, or a displacement number.
+    std::vector<std::string> terms;
+    std::string cur;
+    for (char c : inner) { if (c == '+') { terms.push_back(Trim(cur)); cur.clear(); } else cur += c; }
+    terms.push_back(Trim(cur));
+
+    const auto& regs = RegisterMap();
+    bool haveReg = false;
+    int64_t dispSum = 0;
+    bool haveDisp = false;
+    for (auto& t : terms)
+    {
+        if (t.empty()) continue;
+        size_t star = t.find('*');
+        if (star != std::string::npos)
+        {
+            std::string rn = Trim(t.substr(0, star));
+            int64_t sc = 0;
+            auto it = regs.find(rn);
+            if (it == regs.end() || !ParseNum(t.substr(star + 1), sc)) { error = "bad index term: " + t; return false; }
+            m.index = it->second;
+            m.scale = (uint8_t)sc;
+            continue;
+        }
+        auto it = regs.find(t);
+        if (it != regs.end())
+        {
+            if (!haveReg) { m.base = it->second; haveReg = true; }
+            else { m.index = it->second; m.scale = 1; }
+            continue;
+        }
+        int64_t d = 0;
+        if (!ParseNum(t, d)) { error = "unknown term in [ ]: " + t; return false; }
+        dispSum += d;
+        haveDisp = true;
+    }
+    if (!haveReg && haveDisp)
+    {
+        m.absolute = true;
+        m.absTarget = (uint64_t)dispSum;
+    }
+    else
+    {
+        m.disp = dispSum;
+    }
+    return true;
+}
+} // namespace
+
+bool AssembleInstruction(const std::string& text, bool x64, uint64_t atAddr,
+                         std::vector<uint8_t>& out, std::string& error)
+{
+    std::string line = Trim(text);
+    if (line.empty()) { error = "Type an instruction"; return false; }
+
+    // mnemonic is the first whitespace-delimited token.
+    size_t sp = line.find_first_of(" \t");
+    std::string mstr = Lower(sp == std::string::npos ? line : line.substr(0, sp));
+    std::string rest = sp == std::string::npos ? "" : Trim(line.substr(sp));
+
+    auto mit = MnemonicMap().find(mstr);
+    if (mit == MnemonicMap().end()) { error = "Unknown mnemonic: " + mstr; return false; }
+
+    std::vector<std::string> opers = SplitOps(rest);
+    if (opers.size() > ZYDIS_ENCODER_MAX_OPERANDS) { error = "Too many operands"; return false; }
+
+    ZydisEncoderRequest req{};
+    req.mnemonic = mit->second;
+    req.machine_mode = x64 ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32;
+    req.operand_count = (ZyanU8)opers.size();
+
+    const auto& regs = RegisterMap();
+    int absMemIdx = -1; // operand index of an absolute [addr] needing RIP fixup
+    ParsedMem absMem;
+
+    for (size_t i = 0; i < opers.size(); i++)
+    {
+        const std::string low = Lower(opers[i]);
+        if (!low.empty() && (low.find('[') != std::string::npos))
+        {
+            ParsedMem m;
+            if (!ParseMem(opers[i], m, error)) return false;
+            req.operands[i].type = ZYDIS_OPERAND_TYPE_MEMORY;
+            req.operands[i].mem.size = m.size;
+            if (m.absolute)
+            {
+                req.operands[i].mem.base = x64 ? ZYDIS_REGISTER_RIP : ZYDIS_REGISTER_NONE;
+                req.operands[i].mem.displacement = x64 ? 0 : (int64_t)m.absTarget;
+                if (x64) { absMemIdx = (int)i; absMem = m; }
+            }
+            else
+            {
+                req.operands[i].mem.base = m.base;
+                req.operands[i].mem.index = m.index;
+                req.operands[i].mem.scale = m.scale;
+                req.operands[i].mem.displacement = m.disp;
+            }
+            continue;
+        }
+        auto rit = regs.find(low);
+        if (rit != regs.end())
+        {
+            req.operands[i].type = ZYDIS_OPERAND_TYPE_REGISTER;
+            req.operands[i].reg.value = rit->second;
+            continue;
+        }
+        int64_t imm = 0;
+        if (!ParseNum(opers[i], imm)) { error = "Can't parse operand: " + opers[i]; return false; }
+        req.operands[i].type = ZYDIS_OPERAND_TYPE_IMMEDIATE;
+        req.operands[i].imm.s = imm;
+    }
+
+    // If a memory operand has no size hint, borrow the width of a register operand.
+    for (size_t i = 0; i < opers.size(); i++)
+    {
+        if (req.operands[i].type != ZYDIS_OPERAND_TYPE_MEMORY || req.operands[i].mem.size != 0) continue;
+        for (size_t j = 0; j < opers.size(); j++)
+            if (req.operands[j].type == ZYDIS_OPERAND_TYPE_REGISTER)
+            {
+                uint16_t bits = ZydisRegisterGetWidth(req.machine_mode, req.operands[j].reg.value);
+                if (bits) req.operands[i].mem.size = bits / 8;
+            }
+        if (req.operands[i].mem.size == 0)
+        {
+            error = "Add a size to the memory operand, e.g. dword ptr [ ... ]";
+            return false;
+        }
+    }
+
+    auto emit = [&](std::vector<uint8_t>& dst) -> bool {
+        uint8_t enc[ZYDIS_MAX_INSTRUCTION_LENGTH]{};
+        size_t len = sizeof(enc);
+        if (!ZYAN_SUCCESS(ZydisEncoderEncodeInstruction(&req, enc, &len))) { error = "Could not assemble that"; return false; }
+        dst.assign(enc, enc + len);
+        return true;
+    };
+
+    std::vector<uint8_t> first;
+    if (!emit(first)) return false;
+    if (absMemIdx >= 0)
+    {
+        // RIP-relative disp so the absolute [addr] is reached from atAddr.
+        int64_t disp = (int64_t)absMem.absTarget - (int64_t)(atAddr + first.size());
+        if (disp < INT32_MIN || disp > INT32_MAX) { error = "Address too far to reach RIP-relative"; return false; }
+        req.operands[absMemIdx].mem.displacement = disp;
+        return emit(out);
+    }
+    out = first;
     return true;
 }
 

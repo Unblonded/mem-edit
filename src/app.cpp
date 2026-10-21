@@ -108,6 +108,13 @@ void App::Init(void* hwnd, ImFont* uiFont, ImFont* monoFont)
     m_hex.onLog = [this](const std::string& s) { Log(s); };
     m_hex.onFindAccess = [this](uint64_t a, int size, TraceKind k) { StartTrace(a, size, k); };
     m_hex.onDecompile = [this](uint64_t a) { StartDecompile(a); };
+    m_hex.onAssembleHook = [this](uint64_t a, const std::vector<uint8_t>& bytes, std::string& status) -> bool {
+        if (!m_detours.ReplaceInstruction(m_proc, a, bytes, status)) return false;
+        const Detour* d = m_detours.Find(a);
+        status = "cave at " + ToHex(d ? d->cave : 0);
+        RunDecompile();
+        return true;
+    };
     m_elevated = IsElevated();
     bool dbg = EnableDebugPrivilege();
     Log(std::string("Started. ") + (m_elevated ? "Running as administrator" : "Not elevated - some processes will be inaccessible") +

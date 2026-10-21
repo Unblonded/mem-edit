@@ -1,5 +1,6 @@
 #include "hexview.h"
 
+#include "decompiler.h"
 #include "imgui.h"
 #include "ui.h"
 
@@ -479,10 +480,116 @@ uint64_t HexView::PrevInstr(Process& proc, uint64_t addr)
     return addr > 0 ? addr - 1 : 0;
 }
 
+void HexView::DrawOpcodeLegend()
+{
+    // A hand-picked cheat-sheet of common x86-64 opcodes. /0../7 is the ModRM reg field
+    // (the "group" sub-opcode). Not exhaustive - it's the ones you meet while modding.
+    struct E { const char* op; const char* what; };
+    static const E rows[] = {
+        { "88 89 8A 8B", "mov  (89 = store reg to r/m, 8B = load)" },
+        { "C6 /0  C7 /0", "mov r/m, imm   (C7 = the 32-bit immediate form)" },
+        { "B8..BF", "mov eax..edi, imm32   (B8=eax B9=ecx .. BF=edi)" },
+        { "00 01 02 03", "add  (01 = add reg to r/m, 03 = r + r/m)" },
+        { "28 29 2A 2B", "sub" },
+        { "38 39 3A 3B", "cmp" },
+        { "30 31 32 33", "xor   (31 C0 = xor eax,eax -> eax=0)" },
+        { "20 21 .. / 08 09", "and / or" },
+        { "84 85", "test" },
+        { "83 /r  81 /r", "op r/m, imm   group: /0 add /1 or /4 and /5 sub /6 xor /7 cmp" },
+        { "FE FF /r", "group: /0 inc /1 dec /2 call /4 jmp /6 push" },
+        { "50..57 / 58..5F", "push r64 / pop r64  (50=rax .. 57=rdi)" },
+        { "8D", "lea  (compute an address)" },
+        { "E8 / E9 / EB", "call rel32 / jmp rel32 / jmp rel8" },
+        { "74 75 7C 7D 7E 7F", "je jne jl jge jle jg   (72 jb 73 jae 76 jbe 77 ja)" },
+        { "90 / C3 / CC", "nop / ret / int3 (breakpoint)" },
+        { "48", "REX.W prefix = 64-bit operand (precedes the real opcode)" },
+        { "66 / 67 / F3 F2", "operand16 / address / rep prefixes" },
+        { "0F ..", "two-byte opcodes: 0F 84 je near, 0F B6 movzx, 0F 1F nop" },
+    };
+    ImGui::BeginChild("##legend", ImVec2(0, Px(150)), ImGuiChildFlags_Borders);
+    if (ImGui::BeginTable("##leg", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit))
+    {
+        ImGui::TableSetupColumn("bytes", ImGuiTableColumnFlags_WidthFixed, Px(140));
+        ImGui::TableSetupColumn("meaning", ImGuiTableColumnFlags_WidthStretch);
+        for (const E& e : rows)
+        {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            if (monoFont) ImGui::PushFont(monoFont);
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kColCursor), "%s", e.op);
+            if (monoFont) ImGui::PopFont();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(e.what);
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
+}
+
 void HexView::DrawDisasm(Process& proc)
 {
-    if (monoFont) ImGui::PushFont(monoFont);
     ImGuiIO& io = ImGui::GetIO();
+
+    // --- Assembler bar: type one instruction and write it at the cursor ---
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("asm @");
+    ImGui::SameLine(0, 4);
+    ImGui::TextUnformatted(proc.Symbolize(m_cursor).c_str());
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(Px(330));
+    bool enter = ImGui::InputTextWithHint("##asm", "mov dword ptr [7FF6BD4FB004], 100   (Enter)", m_asmInput,
+                                          sizeof(m_asmInput), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SetItemTooltip("Intel syntax. Immediates are decimal unless prefixed 0x. An absolute\n"
+                          "[address] is written RIP-relative. Shorter than the current instruction\n"
+                          "is NOP-padded; longer overwrites the bytes that follow.");
+    ImGui::SameLine();
+    if ((ImGui::Button("Assemble") || enter) && m_asmInput[0])
+    {
+        std::vector<uint8_t> bytes;
+        std::string err;
+        if (!AssembleInstruction(m_asmInput, proc.Is64(), m_cursor, bytes, err)) m_asmStatus = "x " + err;
+        else
+        {
+            ZydisDecoder d;
+            ZydisDecoderInit(&d, proc.Is64() ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
+                             proc.Is64() ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
+            uint8_t cb[16];
+            size_t cg = proc.Read(m_cursor, cb, sizeof(cb));
+            ZydisDecodedInstruction ci;
+            int curLen = (cg > 0 && ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&d, nullptr, cb, cg, &ci))) ? ci.length
+                                                                                                           : (int)bytes.size();
+            if ((int)bytes.size() > curLen && onAssembleHook)
+            {
+                // Too big to fit in place: let the host route it through a trampoline cave.
+                std::string st;
+                if (onAssembleHook(m_cursor, bytes, st)) m_asmStatus = BytesToHex(bytes.data(), bytes.size()) + "  (routed through a cave: " + st + ")";
+                else m_asmStatus = "x " + st;
+            }
+            else
+            {
+                std::vector<uint8_t> w = bytes;
+                std::string note;
+                if ((int)w.size() < curLen) { w.resize(curLen, 0x90); note = "  (padded to " + std::to_string(curLen) + " with NOPs)"; }
+                else if ((int)bytes.size() > curLen) note = "  (grew past the original - overwrote following bytes)";
+
+                if (proc.Write(m_cursor, w.data(), w.size()))
+                {
+                    m_asmStatus = BytesToHex(bytes.data(), bytes.size()) + note;
+                    if (onLog) onLog("asm: " + std::string(m_asmInput) + " -> " + BytesToHex(bytes.data(), bytes.size()));
+                }
+                else m_asmStatus = "x write failed (page protected?)";
+            }
+        }
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Legend", &m_showLegend);
+    if (!m_asmStatus.empty())
+        ImGui::TextColored(m_asmStatus[0] == 'x' ? ImVec4(1, 0.5f, 0.5f, 1) : ImVec4(0.55f, 0.8f, 1, 1), "%s",
+                           m_asmStatus.c_str());
+    if (m_showLegend) DrawOpcodeLegend();
+    ImGui::Separator();
+
+    if (monoFont) ImGui::PushFont(monoFont);
     const float lh = ImGui::GetTextLineHeightWithSpacing();
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const int rows = std::max(1, (int)(avail.y / lh));

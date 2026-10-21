@@ -39,6 +39,13 @@ bool EncodeImmediate(const std::vector<uint8_t>& insnBytes, bool x64, uint64_t v
 bool PatchImmediate(const Process& proc, const InstructionRow& row, uint64_t value,
                     std::vector<uint8_t>& original, std::string& error);
 
+// Assembles a single Intel-syntax instruction (e.g. "mov dword ptr [0x7FF6BD4FB004], 100") into
+// machine code. `atAddr` is where the bytes will live, so an absolute [address] is encoded
+// RIP-relative to reach it. Immediates are decimal unless prefixed 0x. Relative branches
+// (jmp/call to an address) are not supported. Returns false with a human-readable error.
+bool AssembleInstruction(const std::string& text, bool x64, uint64_t atAddr,
+                         std::vector<uint8_t>& out, std::string& error);
+
 // Re-encodes `insnBytes` with its immediate set to `value`, ALLOWING the encoding to grow (so a
 // value too big for the original immediate width still works), and fixes a RIP-relative memory
 // operand so the instruction still targets the same absolute address when placed at `newAddr`
