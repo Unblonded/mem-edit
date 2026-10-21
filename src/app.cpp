@@ -269,6 +269,7 @@ void App::Frame()
     if (m_showAbout) DrawAbout();
     if (m_showDecompile) DrawDecompile();
     if (m_showCalc) DrawCalculator();
+    if (m_showOpcodes) DrawOpcodes();
     DrawTraceWindows();
     DrawProcessPicker();
     DrawEditValuePopup();
@@ -352,6 +353,7 @@ void App::DrawMenuBar()
         ImGui::EndMenu();
     }
     if (ImGui::MenuItem("Calculator")) m_showCalc = true;
+    if (ImGui::MenuItem("Opcodes")) m_showOpcodes = true;
     if (ImGui::BeginMenu("Help"))
     {
         ImGui::MenuItem("Expressions & shortcuts", nullptr, &m_showAbout);
@@ -2135,6 +2137,59 @@ void App::DrawDetours()
             }
         }
     }
+}
+
+void App::DrawOpcodes()
+{
+    ImGui::SetNextWindowSize(ImVec2(Px(520), Px(460)), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Opcodes", &m_showOpcodes))
+    {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextDisabled("Common x86-64 opcodes. /0../7 is the ModRM reg field (the group sub-opcode).");
+    ImGui::Separator();
+
+    struct E { const char* op; const char* what; };
+    static const E rows[] = {
+        { "88 89 8A 8B", "mov   (89 = store reg to r/m, 8B = load r/m to reg)" },
+        { "C6 /0  C7 /0", "mov r/m, imm   (C7 = the 32-bit immediate form)" },
+        { "B8..BF", "mov eax..edi, imm32   (B8=eax B9=ecx .. BF=edi)" },
+        { "00 01 02 03", "add   (01 = add reg to r/m, 03 = reg + r/m)" },
+        { "28 29 2A 2B", "sub   (NOT 02 - that is add)" },
+        { "38 39 3A 3B", "cmp" },
+        { "30 31 32 33", "xor   (31 C0 = xor eax,eax -> eax = 0)" },
+        { "20 21 .. / 08 09", "and / or" },
+        { "84 85", "test" },
+        { "83 /r  81 /r", "op r/m, imm   group: /0 add /1 or /4 and /5 sub /6 xor /7 cmp" },
+        { "FE FF /r", "group: /0 inc /1 dec /2 call /4 jmp /6 push" },
+        { "50..57 / 58..5F", "push r64 / pop r64   (50=rax .. 57=rdi)" },
+        { "8D", "lea   (compute an address)" },
+        { "E8 / E9 / EB", "call rel32 / jmp rel32 / jmp rel8" },
+        { "74 75 7C 7D 7E 7F", "je jne jl jge jle jg   (72 jb 73 jae 76 jbe 77 ja)" },
+        { "90 / C3 / CC", "nop / ret / int3 (breakpoint)" },
+        { "48", "REX.W prefix = 64-bit operand (precedes the real opcode)" },
+        { "66 / 67 / F3 F2", "operand16 / address / rep prefixes" },
+        { "0F ..", "two-byte opcodes: 0F 84 je near, 0F B6 movzx, 0F 1F nop" },
+    };
+    if (ImGui::BeginTable("##opc", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollY))
+    {
+        ImGui::TableSetupColumn("bytes", ImGuiTableColumnFlags_WidthFixed, Px(150));
+        ImGui::TableSetupColumn("meaning", ImGuiTableColumnFlags_WidthStretch);
+        for (const E& e : rows)
+        {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            if (m_mono) ImGui::PushFont(m_mono);
+            ImGui::TextColored(kColAccent, "%s", e.op);
+            if (m_mono) ImGui::PopFont();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(e.what);
+        }
+        ImGui::EndTable();
+    }
+    ImGui::End();
 }
 
 void App::DrawCalculator()

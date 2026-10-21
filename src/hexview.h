@@ -32,7 +32,6 @@ private:
     void DrawToolbar(Process& proc);
     void DrawBytes(Process& proc);
     void DrawDisasm(Process& proc);
-    void DrawOpcodeLegend();
     uint64_t PrevInstr(Process& proc, uint64_t addr);
     void DrawInspector(Process& proc);
     void DrawContextMenu(Process& proc);
@@ -48,7 +47,6 @@ private:
     uint64_t m_selAnchor = 0;
     int m_bytesPerRow = 16;
     bool m_disasm = false;
-    bool m_showLegend = false;
     char m_asmInput[128] = "";
     std::string m_asmStatus;
     int m_nibble = 0;

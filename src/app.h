@@ -65,6 +65,7 @@ private:
     void StartTrace(uint64_t address, int size, TraceKind kind);
     void DrawDecompile();
     void DrawCalculator();
+    void DrawOpcodes();
     void StartDecompile(uint64_t address);
     void RunDecompile();
     void DrawDisasm();
@@ -161,6 +162,7 @@ private:
 
     // Hex calculator
     bool m_showCalc = false;
+    bool m_showOpcodes = false;
     bool m_calcHex = true;
     int m_calcOp = 0;
     char m_calcA[40] = "0";

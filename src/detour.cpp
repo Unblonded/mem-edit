@@ -307,7 +307,10 @@ bool DetourManager::ReplaceInstruction(const Process& proc, uint64_t addr, const
 {
     if (!proc.IsOpen()) { error = "No process attached"; return false; }
     if (newInsn.empty()) { error = "Nothing to assemble"; return false; }
-    if (Find(addr)) { error = "This address is already detoured. Remove it first."; return false; }
+
+    // Already hooked here? Don't stack a second trampoline - undo the old one (restoring the
+    // original bytes and freeing its cave) and build a fresh one in its place.
+    if (Find(addr)) Remove(proc, addr);
 
     const bool x64 = proc.Is64();
     const size_t jsz = JumpSize(x64);
