@@ -109,6 +109,19 @@ void App::Init(void* hwnd, ImFont* uiFont, ImFont* monoFont)
     m_hex.onFindAccess = [this](uint64_t a, int size, TraceKind k) { StartTrace(a, size, k); };
     m_hex.onDecompile = [this](uint64_t a) { StartDecompile(a); };
     m_hex.onAssembleHook = [this](uint64_t a, const std::vector<uint8_t>& bytes, std::string& status) -> bool {
+        // Writing inside an existing trampoline's free bytes? Just place it there - the room is
+        // already reserved, so keep the original trampoline instead of making a new detour.
+        if (const Detour* d = m_detours.CaveForAddress(a))
+        {
+            if (a + bytes.size() > d->cave + d->caveUserSize)
+            {
+                status = "not enough free bytes left in this cave";
+                return false;
+            }
+            if (!m_proc.Write(a, bytes.data(), bytes.size())) { status = "write failed (page protected?)"; return false; }
+            status = "written into the cave at " + ToHex(d->cave);
+            return true;
+        }
         if (!m_detours.ReplaceInstruction(m_proc, a, bytes, status)) return false;
         const Detour* d = m_detours.Find(a);
         status = "cave at " + ToHex(d ? d->cave : 0);

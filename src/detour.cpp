@@ -193,6 +193,13 @@ const Detour* DetourManager::Find(uint64_t entry) const
     return nullptr;
 }
 
+const Detour* DetourManager::CaveForAddress(uint64_t addr) const
+{
+    for (const auto& d : m_detours)
+        if (d.cave && addr >= d.cave && addr < d.cave + d.caveUserSize) return &d;
+    return nullptr;
+}
+
 bool DetourManager::Redirect(const Process& proc, uint64_t entry, uint64_t target, std::string& error)
 {
     if (!proc.IsOpen()) { error = "No process attached"; return false; }

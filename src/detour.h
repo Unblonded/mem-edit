@@ -56,6 +56,9 @@ public:
     void Clear();                                       // forget all (does not free - process gone)
 
     const Detour* Find(uint64_t entry) const;
+    // The detour whose cave's free region contains `addr` (where you'd write your own code),
+    // or null. Lets the host write assembled bytes straight into a cave instead of re-hooking.
+    const Detour* CaveForAddress(uint64_t addr) const;
     const std::vector<Detour>& All() const { return m_detours; }
     bool Empty() const { return m_detours.empty(); }
 
