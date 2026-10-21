@@ -16,6 +16,7 @@ public:
     void Draw(const char* title, bool* open, Process& proc);
     void GoTo(uint64_t address, bool pushHistory = true);
     void FocusEdit(uint64_t address, uint64_t selectLen); // byte-edit mode, cursor + region highlighted
+    void FocusDisasm(uint64_t address);                   // instruction view at address (for assembling)
     uint64_t Cursor() const { return m_cursor; }
 
     // Callback the host app installs so "Add to address list" works from here.

@@ -109,13 +109,15 @@ void App::Init(void* hwnd, ImFont* uiFont, ImFont* monoFont)
     m_hex.onFindAccess = [this](uint64_t a, int size, TraceKind k) { StartTrace(a, size, k); };
     m_hex.onDecompile = [this](uint64_t a) { StartDecompile(a); };
     m_hex.onAssembleHook = [this](uint64_t a, const std::vector<uint8_t>& bytes, std::string& status) -> bool {
-        // Writing inside an existing trampoline's free bytes? Just place it there - the room is
-        // already reserved, so keep the original trampoline instead of making a new detour.
+        // Inside an existing trampoline's cave? Never hook a cave address - write into the free
+        // bytes if it fits there, otherwise tell them to make the cave bigger. Keeps one trampoline.
         if (const Detour* d = m_detours.CaveForAddress(a))
         {
-            if (a + bytes.size() > d->cave + d->caveUserSize)
+            uint64_t freeEnd = d->cave + d->caveUserSize;
+            if (a >= freeEnd || a + bytes.size() > freeEnd)
             {
-                status = "not enough free bytes left in this cave";
+                status = "past the cave's free bytes (the original instructions live there) - "
+                         "reinstall the cave with more free bytes for room";
                 return false;
             }
             if (!m_proc.Write(a, bytes.data(), bytes.size())) { status = "write failed (page protected?)"; return false; }
@@ -1770,14 +1772,23 @@ void App::DrawDisasm()
             ImGui::TableNextColumn();
             ImGui::PushID((void*)(uintptr_t)r.address);
             bool selected = r.address == m_selectedInsn;
-            if (ImGui::Selectable(m_proc.Symbolize(r.address).c_str(), selected, ImGuiSelectableFlags_SpanAllColumns))
+            if (ImGui::Selectable(m_proc.Symbolize(r.address).c_str(), selected,
+                                  ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
             {
                 m_selectedInsn = r.address;
                 snprintf(m_newImm, sizeof(m_newImm), "%llu", (unsigned long long)r.immediate);
                 std::string hex = BytesToHex(r.bytes.data(), r.bytes.size());
                 snprintf(m_newBytes, sizeof(m_newBytes), "%s", hex.c_str());
                 m_patchStatus.clear();
+                // Double-click jumps to this instruction in the Memory View to edit/assemble it.
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                {
+                    m_hex.FocusDisasm(r.address);
+                    m_showHex = true;
+                    ImGui::SetWindowFocus(kWinHex);
+                }
             }
+            ImGui::SetItemTooltip("Double-click to edit this instruction in the Memory View");
             if (selected && m_scrollToSelected)
             {
                 ImGui::SetScrollHereY(0.4f);

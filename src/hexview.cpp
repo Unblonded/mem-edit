@@ -62,6 +62,13 @@ void HexView::FocusEdit(uint64_t address, uint64_t selectLen)
     }
 }
 
+void HexView::FocusDisasm(uint64_t address)
+{
+    m_disasm = true;  // the instruction view, where the assembler bar lives
+    GoTo(address);
+    m_top = address;  // start decoding exactly on this instruction so it lines up
+}
+
 void HexView::Draw(const char* title, bool* open, Process& proc)
 {
     if (!ImGui::Begin(title, open))

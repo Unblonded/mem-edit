@@ -195,8 +195,9 @@ const Detour* DetourManager::Find(uint64_t entry) const
 
 const Detour* DetourManager::CaveForAddress(uint64_t addr) const
 {
+    // Anywhere inside the whole cave allocation - so we never hook a cave address by mistake.
     for (const auto& d : m_detours)
-        if (d.cave && addr >= d.cave && addr < d.cave + d.caveUserSize) return &d;
+        if (d.cave && addr >= d.cave && addr < d.cave + d.caveSize) return &d;
     return nullptr;
 }
 
