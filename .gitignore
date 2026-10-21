@@ -1,0 +1,20 @@
+# Build output
+bin/
+obj/
+x64/
+Debug/
+Release/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.vcxproj.user
+*.VC.db
+*.VC.opendb
+
+# Misc
+*.pdb
+*.ilk
+*.exp
+*.log
