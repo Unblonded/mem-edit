@@ -1,6 +1,6 @@
-#include "pointerscan.h"
+#include "scan/pointerscan.h"
 
-#include "values.h"
+#include "core/values.h"
 
 #include <algorithm>
 #include <chrono>

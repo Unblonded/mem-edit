@@ -1,6 +1,6 @@
 #pragma once
-#include "decompiler.h"
-#include "target.h"
+#include "code/decompiler.h"
+#include "core/target.h"
 
 #include <cstdint>
 #include <string>

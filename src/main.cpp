@@ -1,12 +1,12 @@
 // Memory Browser - Dear ImGui + DirectX 11 front end.
-#include "app.h"
+#include "app/app.h"
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
-#include "glass.h"
-#include "icons.h"
+#include "ui/glass.h"
+#include "ui/icons.h"
 
 #include <d3d11.h>
 #include <dcomp.h>

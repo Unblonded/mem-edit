@@ -1,15 +1,15 @@
 #pragma once
-#include "decompiler.h"
-#include "detour.h"
-#include "hexview.h"
-#include "patches.h"
-#include "aobscan.h"
-#include "pointerscan.h"
-#include "target.h"
-#include "scanner.h"
-#include "selection.h"
-#include "tracer.h"
-#include "values.h"
+#include "code/decompiler.h"
+#include "code/detour.h"
+#include "ui/hexview.h"
+#include "code/patches.h"
+#include "scan/aobscan.h"
+#include "scan/pointerscan.h"
+#include "core/target.h"
+#include "scan/scanner.h"
+#include "ui/selection.h"
+#include "code/tracer.h"
+#include "core/values.h"
 
 #include <map>
 #include <string>

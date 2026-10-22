@@ -1,6 +1,6 @@
 #pragma once
-#include "target.h"
-#include "values.h"
+#include "core/target.h"
+#include "core/values.h"
 
 #include <atomic>
 #include <cstdint>

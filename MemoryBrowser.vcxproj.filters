@@ -4,6 +4,21 @@
     <Filter Include="src">
       <UniqueIdentifier>{1F2A3B4C-5D6E-4F70-8192-A3B4C5D6E7F8}</UniqueIdentifier>
     </Filter>
+    <Filter Include="src\app">
+      <UniqueIdentifier>{4C5D6E7F-8091-42A3-B4C5-D6E7F8091A2B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\core">
+      <UniqueIdentifier>{5D6E7F80-91A2-43B4-C5D6-E7F8091A2B3C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\scan">
+      <UniqueIdentifier>{6E7F8091-A2B3-44C5-D6E7-F8091A2B3C4D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\code">
+      <UniqueIdentifier>{7F8091A2-B3C4-45D6-E7F8-091A2B3C4D5E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\ui">
+      <UniqueIdentifier>{8091A2B3-C4D5-46E7-F809-1A2B3C4D5E6F}</UniqueIdentifier>
+    </Filter>
     <Filter Include="imgui">
       <UniqueIdentifier>{2A3B4C5D-6E7F-4081-92A3-B4C5D6E7F809}</UniqueIdentifier>
     </Filter>
@@ -13,18 +28,18 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\app.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\hexview.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\target.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\scanner.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\values.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\tracer.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\decompiler.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\patches.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\detour.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\glass.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\pointerscan.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="src\aobscan.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\app\app.cpp"><Filter>src\app</Filter></ClCompile>
+    <ClCompile Include="src\ui\hexview.cpp"><Filter>src\ui</Filter></ClCompile>
+    <ClCompile Include="src\core\target.cpp"><Filter>src\core</Filter></ClCompile>
+    <ClCompile Include="src\scan\scanner.cpp"><Filter>src\scan</Filter></ClCompile>
+    <ClCompile Include="src\core\values.cpp"><Filter>src\core</Filter></ClCompile>
+    <ClCompile Include="src\code\tracer.cpp"><Filter>src\code</Filter></ClCompile>
+    <ClCompile Include="src\code\decompiler.cpp"><Filter>src\code</Filter></ClCompile>
+    <ClCompile Include="src\code\patches.cpp"><Filter>src\code</Filter></ClCompile>
+    <ClCompile Include="src\code\detour.cpp"><Filter>src\code</Filter></ClCompile>
+    <ClCompile Include="src\ui\glass.cpp"><Filter>src\ui</Filter></ClCompile>
+    <ClCompile Include="src\scan\pointerscan.cpp"><Filter>src\scan</Filter></ClCompile>
+    <ClCompile Include="src\scan\aobscan.cpp"><Filter>src\scan</Filter></ClCompile>
     <ClCompile Include="third_party\imgui\imgui.cpp"><Filter>imgui</Filter></ClCompile>
     <ClCompile Include="third_party\imgui\imgui_demo.cpp"><Filter>imgui</Filter></ClCompile>
     <ClCompile Include="third_party\imgui\imgui_draw.cpp"><Filter>imgui</Filter></ClCompile>
@@ -35,21 +50,21 @@
     <ClCompile Include="third_party\imgui\misc\cpp\imgui_stdlib.cpp"><Filter>imgui</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\app.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\hexview.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\target.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\scanner.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\values.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\tracer.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\decompiler.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\patches.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\detour.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\glass.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\pointerscan.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\aobscan.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\icons.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\selection.h"><Filter>src</Filter></ClInclude>
-    <ClInclude Include="src\ui.h"><Filter>src</Filter></ClInclude>
+    <ClInclude Include="src\app\app.h"><Filter>src\app</Filter></ClInclude>
+    <ClInclude Include="src\ui\hexview.h"><Filter>src\ui</Filter></ClInclude>
+    <ClInclude Include="src\core\target.h"><Filter>src\core</Filter></ClInclude>
+    <ClInclude Include="src\scan\scanner.h"><Filter>src\scan</Filter></ClInclude>
+    <ClInclude Include="src\core\values.h"><Filter>src\core</Filter></ClInclude>
+    <ClInclude Include="src\code\tracer.h"><Filter>src\code</Filter></ClInclude>
+    <ClInclude Include="src\code\decompiler.h"><Filter>src\code</Filter></ClInclude>
+    <ClInclude Include="src\code\patches.h"><Filter>src\code</Filter></ClInclude>
+    <ClInclude Include="src\code\detour.h"><Filter>src\code</Filter></ClInclude>
+    <ClInclude Include="src\ui\glass.h"><Filter>src\ui</Filter></ClInclude>
+    <ClInclude Include="src\scan\pointerscan.h"><Filter>src\scan</Filter></ClInclude>
+    <ClInclude Include="src\scan\aobscan.h"><Filter>src\scan</Filter></ClInclude>
+    <ClInclude Include="src\ui\icons.h"><Filter>src\ui</Filter></ClInclude>
+    <ClInclude Include="src\ui\selection.h"><Filter>src\ui</Filter></ClInclude>
+    <ClInclude Include="src\ui\ui.h"><Filter>src\ui</Filter></ClInclude>
     <ClInclude Include="third_party\imgui\imconfig.h"><Filter>imgui</Filter></ClInclude>
     <ClInclude Include="third_party\imgui\imgui.h"><Filter>imgui</Filter></ClInclude>
     <ClInclude Include="third_party\imgui\imgui_internal.h"><Filter>imgui</Filter></ClInclude>

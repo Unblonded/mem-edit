@@ -1,4 +1,4 @@
-#include "scanner.h"
+#include "scan/scanner.h"
 
 #include <algorithm>
 #include <chrono>

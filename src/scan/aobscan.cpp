@@ -1,4 +1,4 @@
-#include "aobscan.h"
+#include "scan/aobscan.h"
 
 #include <Zydis/Zydis.h>
 

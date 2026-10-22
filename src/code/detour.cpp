@@ -1,6 +1,6 @@
-#include "detour.h"
+#include "code/detour.h"
 
-#include "decompiler.h"
+#include "code/decompiler.h"
 
 #include <Zydis/Zydis.h>
 

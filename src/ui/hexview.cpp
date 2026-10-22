@@ -1,10 +1,10 @@
-#include "hexview.h"
+#include "ui/hexview.h"
 
-#include "decompiler.h"
-#include "glass.h"
-#include "icons.h"
+#include "code/decompiler.h"
+#include "ui/glass.h"
+#include "ui/icons.h"
 #include "imgui.h"
-#include "ui.h"
+#include "ui/ui.h"
 
 #include <Zydis/Zydis.h>
 

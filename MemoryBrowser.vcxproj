@@ -77,18 +77,18 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
-    <ClCompile Include="src\app.cpp" />
-    <ClCompile Include="src\hexview.cpp" />
-    <ClCompile Include="src\target.cpp" />
-    <ClCompile Include="src\scanner.cpp" />
-    <ClCompile Include="src\values.cpp" />
-    <ClCompile Include="src\tracer.cpp" />
-    <ClCompile Include="src\decompiler.cpp" />
-    <ClCompile Include="src\patches.cpp" />
-    <ClCompile Include="src\detour.cpp" />
-    <ClCompile Include="src\pointerscan.cpp" />
-    <ClCompile Include="src\aobscan.cpp" />
-    <ClCompile Include="src\glass.cpp" />
+    <ClCompile Include="src\app\app.cpp" />
+    <ClCompile Include="src\ui\hexview.cpp" />
+    <ClCompile Include="src\core\target.cpp" />
+    <ClCompile Include="src\scan\scanner.cpp" />
+    <ClCompile Include="src\core\values.cpp" />
+    <ClCompile Include="src\code\tracer.cpp" />
+    <ClCompile Include="src\code\decompiler.cpp" />
+    <ClCompile Include="src\code\patches.cpp" />
+    <ClCompile Include="src\code\detour.cpp" />
+    <ClCompile Include="src\scan\pointerscan.cpp" />
+    <ClCompile Include="src\scan\aobscan.cpp" />
+    <ClCompile Include="src\ui\glass.cpp" />
     <ClCompile Include="third_party\zydis\src\Decoder.c" />
     <ClCompile Include="third_party\zydis\src\DecoderData.c" />
     <ClCompile Include="third_party\zydis\src\Disassembler.c" />
@@ -130,21 +130,21 @@
     <ClCompile Include="third_party\imgui\misc\cpp\imgui_stdlib.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\app.h" />
-    <ClInclude Include="src\hexview.h" />
-    <ClInclude Include="src\target.h" />
-    <ClInclude Include="src\scanner.h" />
-    <ClInclude Include="src\values.h" />
-    <ClInclude Include="src\tracer.h" />
-    <ClInclude Include="src\decompiler.h" />
-    <ClInclude Include="src\patches.h" />
-    <ClInclude Include="src\detour.h" />
-    <ClInclude Include="src\pointerscan.h" />
-    <ClInclude Include="src\aobscan.h" />
-    <ClInclude Include="src\glass.h" />
-    <ClInclude Include="src\icons.h" />
-    <ClInclude Include="src\selection.h" />
-    <ClInclude Include="src\ui.h" />
+    <ClInclude Include="src\app\app.h" />
+    <ClInclude Include="src\ui\hexview.h" />
+    <ClInclude Include="src\core\target.h" />
+    <ClInclude Include="src\scan\scanner.h" />
+    <ClInclude Include="src\core\values.h" />
+    <ClInclude Include="src\code\tracer.h" />
+    <ClInclude Include="src\code\decompiler.h" />
+    <ClInclude Include="src\code\patches.h" />
+    <ClInclude Include="src\code\detour.h" />
+    <ClInclude Include="src\scan\pointerscan.h" />
+    <ClInclude Include="src\scan\aobscan.h" />
+    <ClInclude Include="src\ui\glass.h" />
+    <ClInclude Include="src\ui\icons.h" />
+    <ClInclude Include="src\ui\selection.h" />
+    <ClInclude Include="src\ui\ui.h" />
     <ClInclude Include="third_party\imgui\imconfig.h" />
     <ClInclude Include="third_party\imgui\imgui.h" />
     <ClInclude Include="third_party\imgui\imgui_internal.h" />

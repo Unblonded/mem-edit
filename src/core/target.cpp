@@ -1,5 +1,5 @@
-#include "target.h"
-#include "values.h"
+#include "core/target.h"
+#include "core/values.h"
 
 #include <tlhelp32.h>
 #include <algorithm>
