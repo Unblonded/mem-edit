@@ -1,6 +1,6 @@
 name: Build
 
-# main      -> build, upload the zip as an artifact, refresh the rolling "nightly" pre-release
+# main      -> build, upload MemoryBrowser.exe as an artifact, refresh the rolling "nightly" pre-release
 # tag v*    -> build and publish a proper release for that tag (e.g. git tag v1.0.0 && git push --tags)
 # PRs       -> build only
 on:
