@@ -87,6 +87,7 @@
     <ClCompile Include="src\patches.cpp" />
     <ClCompile Include="src\detour.cpp" />
     <ClCompile Include="src\pointerscan.cpp" />
+    <ClCompile Include="src\aobscan.cpp" />
     <ClCompile Include="src\glass.cpp" />
     <ClCompile Include="third_party\zydis\src\Decoder.c" />
     <ClCompile Include="third_party\zydis\src\DecoderData.c" />
@@ -139,8 +140,10 @@
     <ClInclude Include="src\patches.h" />
     <ClInclude Include="src\detour.h" />
     <ClInclude Include="src\pointerscan.h" />
+    <ClInclude Include="src\aobscan.h" />
     <ClInclude Include="src\glass.h" />
     <ClInclude Include="src\icons.h" />
+    <ClInclude Include="src\selection.h" />
     <ClInclude Include="src\ui.h" />
     <ClInclude Include="third_party\imgui\imconfig.h" />
     <ClInclude Include="third_party\imgui\imgui.h" />

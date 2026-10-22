@@ -635,6 +635,7 @@ void HexView::DrawDisasm(Process& proc)
         {
             m_cursor = m_selAnchor = a;
             if (onDecompile && ImGui::MenuItem("Decompile this function")) onDecompile(a);
+            if (onMakeSignature && ImGui::MenuItem("Make AOB signature here")) onMakeSignature(a);
             if (onFindAccess)
             {
                 int sz = std::min((int)len, 8);
@@ -750,6 +751,7 @@ void HexView::DrawContextMenu(Process& proc)
         if (ImGui::MenuItem("Find out what accesses this address")) onFindAccess(a, size, TraceKind::Accesses);
     }
     if (onDecompile && ImGui::MenuItem("Decompile function here")) onDecompile(a);
+    if (onMakeSignature && ImGui::MenuItem("Make AOB signature here")) onMakeSignature(a);
     if (ImGui::BeginMenu("Fill selection"))
     {
         auto fill = [&](uint8_t v) {

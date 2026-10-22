@@ -3,9 +3,11 @@
 #include "detour.h"
 #include "hexview.h"
 #include "patches.h"
+#include "aobscan.h"
 #include "pointerscan.h"
 #include "target.h"
 #include "scanner.h"
+#include "selection.h"
 #include "tracer.h"
 #include "values.h"
 
@@ -29,6 +31,7 @@ struct WatchEntry
     uint64_t address = 0;
     bool resolved = false;
     std::string error;
+    bool selected = false; // row selection in the address list; follows the entry when sorted
 };
 
 // One "find out what writes/accesses this address" window.
@@ -69,6 +72,16 @@ private:
     void DrawOpcodes();
     void DrawPointerScan();
     void OpenPointerScan(uint64_t target);
+    void DrawAobScan();
+    void DrawAobScanTab();
+    void DrawSigMakerTab();
+    void DrawSigListTab();
+    void StartAobScan();
+    AobScanOptions AobOptions() const;
+    void OpenAobScan(const std::string& pattern, bool run); // show the AOB window with a pattern
+    void OpenSigMaker(uint64_t address);                     // "Make AOB signature here"
+    void SaveSigList();
+    void LoadSigList();
     void StartDecompile(uint64_t address);
     void RunDecompile();
     void DrawDisasm();
@@ -118,7 +131,8 @@ private:
     std::string m_scanError;
 
     // Results
-    int64_t m_resSelA = -1, m_resSelB = -1;
+    RowSelection m_resSel;   // scan results (Ctrl/Shift multi-select)
+    int m_watchAnchor = -1;  // address list: last clicked row, for Shift ranges
 
     // Address list
     std::vector<WatchEntry> m_watches;
@@ -173,7 +187,40 @@ private:
     bool m_ptrAllowNeg = false;
     char m_ptrNewTarget[64] = "";   // "rescan after restart" target
     std::string m_ptrStatus;
-    int m_ptrSel = -1;
+    std::vector<char> m_ptrSelected; // per-result selection flag (index-aligned to results)
+    std::vector<int> m_ptrOrder;     // display order (sorted) into results
+    int m_ptrAnchor = -1;            // last-clicked display row, for shift-range select
+
+    // AOB (array of bytes) scan, signature maker and signature list
+    AobScanner m_aob;
+    bool m_showAob = false;
+    int m_aobTabRequest = -1;            // switch to this tab on the next frame
+    char m_aobPattern[2048] = "";
+    int m_aobScope = 0;                  // 0 = all memory, otherwise index+1 into m_aobModules
+    std::vector<ModuleInfo> m_aobModules;
+    bool m_aobExecOnly = true;
+    bool m_aobWritableOnly = false;
+    bool m_aobIncludeMapped = false;
+    RowSelection m_aobSel;
+    std::string m_aobStatus;
+    char m_sigAddress[128] = "";
+    SigMakerOptions m_sigOpts;
+    SigMakerResult m_sigResult;
+    bool m_sigHave = false;
+    uint64_t m_sigAt = 0;                // address the current signature was made for
+    double m_sigMs = 0;
+    struct SigEntry
+    {
+        std::string name;
+        std::string pattern;
+        bool scanned = false;
+        size_t matches = 0;
+        uint64_t first = 0;
+        std::string error;
+    };
+    std::vector<SigEntry> m_sigList;
+    char m_sigNewName[64] = "";
+    char m_sigNewPattern[1024] = "";
 
     // Hex calculator
     bool m_showCalc = false;

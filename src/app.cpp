@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <cctype>
 #include <climits>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cerrno>
 #include <cstdlib>
@@ -31,6 +33,7 @@ const char* kWinRegions = ICON_GRID "  Memory Regions###Memory Regions";
 const char* kWinModules = ICON_PUZZLE "  Modules###Modules";
 const char* kWinLog = ICON_LOG "  Log###Log";
 const char* kWinDecompile = ICON_CODE "  Decompile###Decompile";
+const char* kWinAob = ICON_FLASH "  AOB Scan###AOB Scan";
 
 // Status colours stay distinguishable but are muted to sit in the duotone palette.
 const ImVec4 kColErr(0.93f, 0.55f, 0.58f, 1.0f);
@@ -111,6 +114,7 @@ void App::Init(void* hwnd, ImFont* uiFont, ImFont* monoFont)
     m_hex.onFindAccess = [this](uint64_t a, int size, TraceKind k) { StartTrace(a, size, k); };
     m_hex.onDecompile = [this](uint64_t a) { StartDecompile(a); };
     m_hex.onRequestAttach = [this] { m_openPicker = true; };
+    m_hex.onMakeSignature = [this](uint64_t a) { OpenSigMaker(a); };
     m_hex.onAssembleHook = [this](uint64_t a, const std::vector<uint8_t>& bytes, std::string& status) -> bool {
         // Inside an existing trampoline's cave? Never hook a cave address. Any instruction in the
         // cave ([head stolen][free][trailing jmp/jump back]) is editable except the jump back, which
@@ -193,7 +197,12 @@ void App::Detach()
     m_proc.Close();
     m_scanner.Reset();
     m_regions.clear();
-    m_resSelA = m_resSelB = -1;
+    m_resSel.Clear();
+    m_aob.Reset(); // results are addresses in the old process
+    m_aobSel.Clear();
+    m_aobModules.clear();
+    m_aobScope = 0;
+    for (auto& e : m_sigList) e.scanned = false;
     for (auto& w : m_watches) w.frozen = false;
 }
 
@@ -263,6 +272,15 @@ void App::Frame()
                 std::to_string((int)m_ptrScan.LastDurationMs()) + " ms");
     }
 
+    bool aobWasBusy = m_aob.Busy();
+    m_aob.Update();
+    if (aobWasBusy && !m_aob.Busy())
+    {
+        m_aobSel.Clear();
+        Log("AOB scan: " + std::to_string(m_aob.Results().size()) + (m_aob.Truncated() ? "+" : "") + " matches for " +
+            m_aob.Pattern().ToIda() + " in " + std::to_string((int)m_aob.LastDurationMs()) + " ms");
+    }
+
     UpdateWatches();
 
     ImGuiIO& io = ImGui::GetIO();
@@ -299,6 +317,7 @@ void App::Frame()
     if (m_showCalc) DrawCalculator();
     if (m_showOpcodes) DrawOpcodes();
     if (m_showPtrScan) DrawPointerScan();
+    if (m_showAob) DrawAobScan();
     DrawTraceWindows();
     DrawProcessPicker();
     DrawEditValuePopup();
@@ -396,6 +415,7 @@ void App::DrawMenuBar()
         ImGui::MenuItem(kWinModules, nullptr, &m_showModules);
         ImGui::MenuItem(kWinLog, nullptr, &m_showLog);
         ImGui::MenuItem(kWinDecompile, nullptr, &m_showDecompile);
+        ImGui::MenuItem(kWinAob, nullptr, &m_showAob);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset layout"))
         {
@@ -408,6 +428,7 @@ void App::DrawMenuBar()
     if (ImGui::MenuItem("Calculator")) m_showCalc = true;
     if (ImGui::MenuItem("Opcodes")) m_showOpcodes = true;
     if (ImGui::MenuItem("Pointer scan")) m_showPtrScan = true;
+    if (ImGui::MenuItem("AOB scan")) m_showAob = true;
     if (ImGui::BeginMenu("Help"))
     {
         ImGui::MenuItem("Expressions & shortcuts", nullptr, &m_showAbout);
@@ -668,7 +689,7 @@ void App::DrawScanner()
     else if (ImGui::Button(ICON_REFRESH "  New Scan", ImVec2(bw, 0)))
     {
         m_scanner.Reset();
-        m_resSelA = m_resSelB = -1;
+        m_resSel.Clear();
         if (!CompareAllowed(m_opts.compare, m_opts.type, true)) m_opts.compare = ScanCompare::Exact;
         hasResults = false;
     }
@@ -679,7 +700,7 @@ void App::DrawScanner()
         doNext = true;
     ImGui::SameLine();
     ImGui::BeginDisabled(!m_scanner.CanUndo());
-    if (ImGui::Button(ICON_UNDO "  Undo Scan", ImVec2(bw, 0))) { m_scanner.Undo(); m_resSelA = m_resSelB = -1; }
+    if (ImGui::Button(ICON_UNDO "  Undo Scan", ImVec2(bw, 0))) { m_scanner.Undo(); m_resSel.Clear(); }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
 
@@ -850,7 +871,7 @@ void App::DrawScanner()
         m_opts.endAddress = e;
         m_scanError.clear();
         if (!m_scanner.Start(m_proc, m_opts, doFirst, m_scanError)) Log("Scan error: " + m_scanError);
-        m_resSelA = m_resSelB = -1;
+        m_resSel.Clear();
     }
     ImGui::End();
 }
@@ -896,7 +917,61 @@ void App::DrawResults()
 
     const size_t count = st.addresses.size();
     const size_t vs = st.valueSize;
-    int64_t selMin = std::min(m_resSelA, m_resSelB), selMax = std::max(m_resSelA, m_resSelB);
+    m_resSel.Resize(count);
+
+    // Selected results -> address list (capped so a stray Ctrl+A on millions can't hang the UI).
+    auto addSelected = [&] {
+        size_t added = 0;
+        m_resSel.ForEach([&](size_t k) {
+            if (added++ < 5000) AddWatch(st.addresses[k], st.type, (int)vs);
+        });
+        if (added > 5000) Log("Added the first 5000 of " + std::to_string(added) + " selected results");
+    };
+    auto copySelected = [&] {
+        std::string text;
+        size_t n = 0;
+        m_resSel.ForEach([&](size_t k) {
+            if (n++ < 100000) text += ToHex(st.addresses[k]) + "\n";
+        });
+        ImGui::SetClipboardText(text.c_str());
+    };
+    auto editSelected = [&] {
+        m_editWatch = -2;
+        m_editBuf[0] = 0;
+        m_openEditPopup = true;
+    };
+
+    // Toolbar: counts plus actions on the selection.
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%zu %s", count, count == 1 ? "result" : "results");
+    if (m_resSel.Count())
+    {
+        ImGui::SameLine();
+        ImGui::TextColored(kColAccent, "%zu selected", m_resSel.Count());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_ADD " Add to list")) addSelected();
+        ImGui::SetItemTooltip("Add the selected results to the address list (Enter)");
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_EDIT " Set value")) editSelected();
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_COPY " Copy")) copySelected();
+        ImGui::SetItemTooltip("Copy the selected addresses (Ctrl+C)");
+    }
+    else
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled(" -  Ctrl/Shift+click to select several");
+    }
+
+    // Keyboard, while this panel has focus and no text field is being edited.
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput)
+    {
+        const bool ctrl = ImGui::GetIO().KeyCtrl;
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) m_resSel.SelectAll();
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_C, false) && m_resSel.Count()) copySelected();
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) && m_resSel.Count()) addSelected();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) m_resSel.Clear();
+    }
 
     ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV |
                          ImGuiTableFlags_Resizable;
@@ -922,7 +997,7 @@ void App::DrawResults()
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 ImGui::PushID(i);
-                bool selected = i >= selMin && i <= selMax;
+                bool selected = m_resSel.Get(i);
                 ModuleInfo m;
                 bool isStatic = m_proc.ModuleFromAddress(a, m);
                 std::string label = isStatic ? m_proc.Symbolize(a) : AddrText(a);
@@ -930,29 +1005,32 @@ void App::DrawResults()
                 if (ImGui::Selectable(label.c_str(), selected,
                                       ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
                 {
-                    if (ImGui::GetIO().KeyShift && m_resSelA >= 0) m_resSelB = i;
-                    else m_resSelA = m_resSelB = i;
                     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) AddWatch(a, st.type, (int)vs);
+                    else m_resSel.Click(i);
                 }
                 if (isStatic) ImGui::PopStyleColor();
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && !selected) m_resSelA = m_resSelB = i;
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) m_resSel.SelectForContextMenu(i);
                 if (ImGui::BeginPopupContextItem("##rctx"))
                 {
-                    int64_t a0 = std::min(m_resSelA, m_resSelB), a1 = std::max(m_resSelA, m_resSelB);
-                    int64_t n = a1 - a0 + 1;
-                    if (ImGui::MenuItem(n > 1 ? "Add selected to address list" : "Add to address list"))
+                    const size_t n = m_resSel.Count();
+                    std::string addLabel = n > 1 ? "Add " + std::to_string(n) + " selected to address list" : "Add to address list";
+                    if (ImGui::MenuItem((ICON_ADD "  " + addLabel).c_str(), "Enter")) addSelected();
+                    if (ImGui::MenuItem(n > 1 ? ICON_EDIT "  Change value of selected..." : ICON_EDIT "  Change value..."))
                     {
-                        for (int64_t k = a0; k <= a1 && k < a0 + 5000; k++) AddWatch(st.addresses[k], st.type, (int)vs);
-                    }
-                    if (ImGui::MenuItem("Browse memory here")) { m_hex.GoTo(a); m_showHex = true; ImGui::SetWindowFocus(kWinHex); }
-                    if (ImGui::MenuItem("Pointer scan for this address")) OpenPointerScan(a);
-                    if (ImGui::MenuItem("Change value of selected..."))
-                    {
-                        m_editWatch = -2;
+                        editSelected();
                         snprintf(m_editBuf, sizeof(m_editBuf), "%s", ok ? FormatValue(st.type, cur.data(), vs, false).c_str() : "");
-                        m_openEditPopup = true;
                     }
-                    if (ImGui::MenuItem("Copy address")) ImGui::SetClipboardText(ToHex(a).c_str());
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(ICON_CHIP "  Browse memory here")) { m_hex.GoTo(a); m_showHex = true; ImGui::SetWindowFocus(kWinHex); }
+                    if (ImGui::MenuItem(ICON_SEARCH "  Pointer scan for this address")) OpenPointerScan(a);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(n > 1 ? ICON_COPY "  Copy selected addresses" : ICON_COPY "  Copy address", "Ctrl+C"))
+                        copySelected();
+                    if (ImGui::MenuItem(ICON_COPY "  Copy value", nullptr, false, ok))
+                        ImGui::SetClipboardText(FormatValue(st.type, cur.data(), vs, false).c_str());
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Select all", "Ctrl+A")) m_resSel.SelectAll();
+                    if (ImGui::MenuItem("Clear selection", "Esc", false, n > 0)) m_resSel.Clear();
                     ImGui::EndPopup();
                 }
                 ImGui::PopID();
@@ -1003,8 +1081,15 @@ void App::DrawEditValuePopup()
     else if (m_editWatch == -2)
     {
         type = m_scanner.State().type;
-        int64_t n = std::abs(m_resSelB - m_resSelA) + 1;
-        ImGui::Text("Set %lld selected result(s)", (long long)n);
+        ImGui::Text("Set %zu selected result(s)", m_resSel.Count());
+    }
+    else if (m_editWatch == -3)
+    {
+        // Several address-list entries: each is written with its own type.
+        size_t n = 0;
+        for (const auto& w : m_watches)
+            if (w.selected && !n++) type = w.type, hex = w.hex;
+        ImGui::Text("Set %zu selected entries", n);
     }
     ImGui::TextDisabled("Type: %s%s", ValueTypeName(type), hex ? " (hex)" : "");
 
@@ -1039,11 +1124,29 @@ void App::DrawEditValuePopup()
         else if (m_editWatch == -2)
         {
             const ScanState& st = m_scanner.State();
-            int64_t a0 = std::min(m_resSelA, m_resSelB), a1 = std::max(m_resSelA, m_resSelB);
             int fails = 0;
-            for (int64_t k = std::max<int64_t>(a0, 0); k <= a1 && k < (int64_t)st.addresses.size(); k++)
-                if (!m_proc.Write(st.addresses[k], pv.bytes.data(), pv.bytes.size())) fails++;
+            m_resSel.ForEach([&](size_t k) {
+                if (k < st.addresses.size() && !m_proc.Write(st.addresses[k], pv.bytes.data(), pv.bytes.size())) fails++;
+            });
             if (fails) Log(std::to_string(fails) + " writes failed");
+        }
+        else if (m_editWatch == -3)
+        {
+            int fails = 0;
+            for (auto& w : m_watches)
+            {
+                if (!w.selected) continue;
+                ParsedValue v = ParseValue(w.type, m_editBuf, w.hex);
+                if (!v.ok) { fails++; continue; }
+                if (w.type == ValueType::String || w.type == ValueType::WString)
+                {
+                    v.bytes.push_back(0);
+                    if (w.type == ValueType::WString) v.bytes.push_back(0);
+                }
+                if (!w.resolved || !m_proc.Write(w.address, v.bytes.data(), v.bytes.size())) fails++;
+                else if (w.frozen) w.frozenBytes = v.bytes;
+            }
+            if (fails) Log(std::to_string(fails) + " of the selected entries could not be written");
         }
         ImGui::CloseCurrentPopup();
     }
@@ -1072,16 +1175,102 @@ void App::DrawAddressList()
     ImGui::SameLine();
     if (ImGui::Button("Clear")) m_watches.clear();
     ImGui::EndDisabled();
+    const int selCount = (int)std::count_if(m_watches.begin(), m_watches.end(), [](const WatchEntry& w) { return w.selected; });
     ImGui::SameLine();
-    ImGui::TextDisabled("%zu entries", m_watches.size());
+    ImGui::TextDisabled("%zu %s", m_watches.size(), m_watches.size() == 1 ? "entry" : "entries");
+    if (selCount)
+    {
+        ImGui::SameLine();
+        ImGui::TextColored(kColAccent, "%d selected", selCount);
+    }
 
-    int removeIdx = -1, dupIdx = -1, moveFrom = -1, moveTo = -1;
+    // Reads the live value of an entry (also used for sorting and freezing).
+    auto readValue = [&](const WatchEntry& w, std::vector<uint8_t>& buf) {
+        buf.resize(WatchSize(w));
+        return w.resolved && m_proc.ReadExact(w.address, buf.data(), buf.size());
+    };
+    auto setFrozen = [&](WatchEntry& w, bool on) {
+        std::vector<uint8_t> buf;
+        if (!on || !readValue(w, buf)) { w.frozen = false; return; }
+        w.frozen = true;
+        w.frozenBytes = buf;
+        if (w.type == ValueType::String) // freeze only up to the terminator
+        {
+            auto z = std::find(w.frozenBytes.begin(), w.frozenBytes.end(), 0);
+            if (z != w.frozenBytes.end()) w.frozenBytes.erase(z + 1, w.frozenBytes.end());
+        }
+    };
+    auto forSelected = [&](auto fn) {
+        for (auto& w : m_watches)
+            if (w.selected) fn(w);
+    };
+    auto deleteSelected = [&] {
+        m_watches.erase(std::remove_if(m_watches.begin(), m_watches.end(), [](const WatchEntry& w) { return w.selected; }),
+                        m_watches.end());
+        m_watchAnchor = -1;
+    };
+    auto toggleFreezeSelected = [&] {
+        bool anyThawed = false;
+        forSelected([&](WatchEntry& w) { anyThawed |= !w.frozen; });
+        forSelected([&](WatchEntry& w) { setFrozen(w, anyThawed); });
+    };
+    auto copySelected = [&] {
+        std::string text;
+        forSelected([&](WatchEntry& w) {
+            std::vector<uint8_t> buf;
+            bool ok = readValue(w, buf);
+            text += w.description + "\t" + w.expression + "\t" + (w.resolved ? ToHex(w.address) : "?") + "\t" +
+                    (ok ? FormatValue(w.type, buf.data(), buf.size(), w.hex) : "??") + "\n";
+        });
+        ImGui::SetClipboardText(text.c_str());
+    };
+    auto duplicateSelected = [&] {
+        std::vector<WatchEntry> out;
+        out.reserve(m_watches.size() * 2);
+        for (auto& w : m_watches)
+        {
+            out.push_back(w);
+            out.back().selected = false;
+            if (w.selected)
+            {
+                WatchEntry copy = w;
+                copy.frozen = false;
+                out.push_back(std::move(copy)); // the copies become the selection
+            }
+        }
+        m_watches = std::move(out);
+    };
+    auto editSelected = [&] {
+        m_editWatch = -3;
+        m_editBuf[0] = 0;
+        m_openEditPopup = true;
+    };
+
+    // Keyboard, while this panel has focus and no text field is being edited.
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput)
+    {
+        const bool ctrl = ImGui::GetIO().KeyCtrl;
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) for (auto& w : m_watches) w.selected = true;
+        if (selCount)
+        {
+            if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) deleteSelected();
+            else if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) toggleFreezeSelected();
+            else if (ImGui::IsKeyPressed(ImGuiKey_Enter, false)) editSelected();
+            else if (ctrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) copySelected();
+            else if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) duplicateSelected();
+            else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) for (auto& w : m_watches) w.selected = false;
+        }
+    }
+
+    int removeIdx = -1, dupIdx = -1, moveFrom = -1, moveTo = -1, clickRow = -1;
+    bool bulkDelete = false;
     ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV |
-                         ImGuiTableFlags_Resizable | ImGuiTableFlags_Reorderable;
+                         ImGuiTableFlags_Resizable | ImGuiTableFlags_Reorderable | ImGuiTableFlags_Sortable |
+                         ImGuiTableFlags_SortTristate;
     if (ImGui::BeginTable("##watch", 6, tf))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("Freeze", ImGuiTableColumnFlags_WidthFixed, Px(50));
+        ImGui::TableSetupColumn("Freeze", ImGuiTableColumnFlags_WidthFixed, Px(56));
         ImGui::TableSetupColumn("Description", ImGuiTableColumnFlags_WidthStretch, 1.2f);
         ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 1.6f);
         ImGui::TableSetupColumn("Resolved", ImGuiTableColumnFlags_WidthStretch, 1.0f);
@@ -1089,34 +1278,96 @@ void App::DrawAddressList()
         ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.4f);
         ImGui::TableHeadersRow();
 
+        // Clicking a header sorts the list in place (once - values that change later don't reshuffle rows).
+        if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs())
+        {
+            if (specs->SpecsDirty && specs->SpecsCount > 0)
+            {
+                const ImGuiTableColumnSortSpecs& s = specs->Specs[0];
+                const bool desc = s.SortDirection == ImGuiSortDirection_Descending;
+                // Numeric key for the Value column; text values fall back to string order.
+                std::vector<std::pair<double, std::string>> keys(m_watches.size());
+                std::vector<uint8_t> buf;
+                for (size_t k = 0; k < m_watches.size(); k++)
+                {
+                    const WatchEntry& w = m_watches[k];
+                    bool ok = readValue(w, buf);
+                    keys[k].second = ok ? FormatValue(w.type, buf.data(), buf.size(), false) : "";
+                    keys[k].first = ok && IsNumeric(w.type) ? strtod(keys[k].second.c_str(), nullptr) : -HUGE_VAL;
+                }
+                std::vector<size_t> order(m_watches.size());
+                for (size_t k = 0; k < order.size(); k++) order[k] = k;
+                std::stable_sort(order.begin(), order.end(), [&](size_t x, size_t y) {
+                    const WatchEntry& a = m_watches[x];
+                    const WatchEntry& b = m_watches[y];
+                    int c = 0;
+                    switch (s.ColumnIndex)
+                    {
+                    case 0: c = (int)b.frozen - (int)a.frozen; break;
+                    case 1: c = Lower(a.description).compare(Lower(b.description)); break;
+                    case 2: c = Lower(a.expression).compare(Lower(b.expression)); break;
+                    case 3: c = a.resolved != b.resolved ? (a.resolved ? -1 : 1) : a.address < b.address ? -1 : a.address > b.address; break;
+                    case 4: c = (int)a.type - (int)b.type; break;
+                    case 5:
+                        c = keys[x].first < keys[y].first ? -1 : keys[x].first > keys[y].first;
+                        if (!c) c = keys[x].second.compare(keys[y].second);
+                        break;
+                    }
+                    return desc ? c > 0 : c < 0;
+                });
+                std::vector<WatchEntry> sorted;
+                sorted.reserve(m_watches.size());
+                for (size_t k : order) sorted.push_back(std::move(m_watches[k]));
+                m_watches = std::move(sorted);
+                m_watchAnchor = -1;
+                specs->SpecsDirty = false;
+            }
+        }
+
         for (int i = 0; i < (int)m_watches.size(); i++)
         {
             WatchEntry& w = m_watches[i];
             ImGui::PushID(i);
-            ImGui::TableNextRow();
+            ImGui::TableNextRow(0, ImGui::GetFrameHeight());
 
             size_t sz = WatchSize(w);
             std::vector<uint8_t> buf(sz);
             bool readOk = w.resolved && m_proc.ReadExact(w.address, buf.data(), sz);
 
-            ImGui::TableNextColumn();
-            if (ImGui::Checkbox("##frz", &w.frozen))
-            {
-                if (w.frozen && readOk)
+            // Right-click anywhere on the row: select it (unless it's already part of the selection), open the menu.
+            auto rowContext = [&] {
+                if (!ImGui::IsItemClicked(ImGuiMouseButton_Right)) return;
+                if (!w.selected)
                 {
-                    w.frozenBytes = buf;
-                    if (w.type == ValueType::String) // freeze only up to the terminator
-                    {
-                        auto z = std::find(w.frozenBytes.begin(), w.frozenBytes.end(), 0);
-                        if (z != w.frozenBytes.end()) w.frozenBytes.erase(z + 1, w.frozenBytes.end());
-                    }
+                    for (auto& o : m_watches) o.selected = false;
+                    w.selected = true;
+                    m_watchAnchor = i;
                 }
-                else if (w.frozen) w.frozen = false;
+                ImGui::OpenPopup("##wctx");
+            };
+
+            // Whole-row selectable underneath the cells; the widgets on top still get their clicks.
+            ImGui::TableNextColumn();
+            ImVec2 cell = ImGui::GetCursorPos();
+            if (ImGui::Selectable("##row", w.selected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
+                                  ImVec2(0, ImGui::GetFrameHeight())))
+                clickRow = i;
+            rowContext();
+            ImGui::SetCursorPos(cell);
+
+            bool frozen = w.frozen;
+            if (ImGui::Checkbox("##frz", &frozen))
+            {
+                // Toggling a selected row's box applies to the whole selection.
+                if (w.selected && selCount > 1) forSelected([&](WatchEntry& o) { setFrozen(o, frozen); });
+                else setFrozen(w, frozen);
             }
 
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::InputText("##desc", &w.description);
+            if (ImGui::IsItemActivated() && !w.selected) clickRow = i;
+            rowContext();
 
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-FLT_MIN);
@@ -1125,6 +1376,8 @@ void App::DrawAddressList()
             ImGui::InputText("##expr", &w.expression);
             if (!w.resolved) ImGui::PopStyleColor();
             if (m_mono) ImGui::PopFont();
+            if (ImGui::IsItemActivated() && !w.selected) clickRow = i;
+            rowContext();
             if (!w.error.empty()) ImGui::SetItemTooltip("%s", w.error.c_str());
 
             ImGui::TableNextColumn();
@@ -1133,6 +1386,8 @@ void App::DrawAddressList()
             else ImGui::TextDisabled("-");
             if (m_mono) ImGui::PopFont();
 
+            // Type: picking one on a selected row retypes the whole selection.
+            const bool multi = w.selected && selCount > 1;
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-FLT_MIN);
             if (ImGui::BeginCombo("##type", ValueTypeName(w.type)))
@@ -1140,8 +1395,9 @@ void App::DrawAddressList()
                 for (int t = 0; t < (int)ValueType::Count; t++)
                     if (ImGui::Selectable(ValueTypeName((ValueType)t), (int)w.type == t))
                     {
-                        w.type = (ValueType)t;
-                        w.frozen = false;
+                        auto retype = [&](WatchEntry& o) { o.type = (ValueType)t; o.frozen = false; };
+                        if (multi) forSelected(retype);
+                        else retype(w);
                     }
                 if (ValueTypeSize(w.type) == 0)
                 {
@@ -1153,65 +1409,107 @@ void App::DrawAddressList()
                 ImGui::Checkbox("Show as hex", &w.hex);
                 ImGui::EndCombo();
             }
+            if (ImGui::IsItemActivated() && !w.selected) clickRow = i;
+            rowContext();
 
             ImGui::TableNextColumn();
             if (m_mono) ImGui::PushFont(m_mono);
             std::string val = readOk ? FormatValue(w.type, buf.data(), sz, w.hex) : "??";
             if (w.frozen) ImGui::PushStyleColor(ImGuiCol_Text, kColAccent);
-            if (ImGui::Selectable((val + "##val").c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) &&
-                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && readOk)
+            if (ImGui::Selectable((val + "##val").c_str(), false, ImGuiSelectableFlags_AllowDoubleClick))
             {
-                m_editWatch = i;
-                snprintf(m_editBuf, sizeof(m_editBuf), "%s", val.c_str());
-                m_openEditPopup = true;
-            }
-            if (w.frozen) ImGui::PopStyleColor();
-            if (m_mono) ImGui::PopFont();
-            ImGui::SetItemTooltip("Double-click to change the value");
-
-            if (ImGui::BeginPopupContextItem("##wctx"))
-            {
-                if (ImGui::MenuItem("Change value...", nullptr, false, readOk))
+                if (!ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) clickRow = i;
+                else if (multi) editSelected();
+                else if (readOk)
                 {
                     m_editWatch = i;
                     snprintf(m_editBuf, sizeof(m_editBuf), "%s", val.c_str());
                     m_openEditPopup = true;
                 }
-                if (ImGui::MenuItem("Browse memory here", nullptr, false, w.resolved))
+            }
+            if (w.frozen) ImGui::PopStyleColor();
+            if (m_mono) ImGui::PopFont();
+            rowContext();
+            ImGui::SetItemTooltip("Double-click to change the value");
+
+            if (ImGui::BeginPopup("##wctx"))
+            {
+                const int n = selCount > 0 ? selCount : 1;
+                if (n > 1)
                 {
-                    m_hex.GoTo(w.address);
-                    m_showHex = true;
-                    ImGui::SetWindowFocus(kWinHex);
+                    ImGui::TextDisabled("%d entries selected", n);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(ICON_EDIT "  Change value of selected...", "Enter")) editSelected();
+                    if (ImGui::MenuItem(ICON_PIN "  Freeze / unfreeze selected", "Space")) toggleFreezeSelected();
+                    if (ImGui::BeginMenu(ICON_SETTINGS "  Set type"))
+                    {
+                        for (int t = 0; t < (int)ValueType::Count; t++)
+                            if (ImGui::MenuItem(ValueTypeName((ValueType)t)))
+                                forSelected([&](WatchEntry& o) { o.type = (ValueType)t; o.frozen = false; });
+                        ImGui::EndMenu();
+                    }
+                    if (ImGui::MenuItem("Show as hex", nullptr, w.hex)) { bool h = !w.hex; forSelected([&](WatchEntry& o) { o.hex = h; }); }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(ICON_COPY "  Copy selected", "Ctrl+C")) copySelected();
+                    if (ImGui::MenuItem(ICON_ADD "  Duplicate selected", "Ctrl+D")) duplicateSelected();
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(ICON_DELETE "  Delete selected", "Del")) bulkDelete = true;
                 }
-                ImGui::Separator();
-                if (ImGui::MenuItem("Find out what writes to this address", nullptr, false, w.resolved))
-                    StartTrace(w.address, (int)std::min<size_t>(sz, 8), TraceKind::Writes);
-                if (ImGui::MenuItem("Find out what accesses this address", nullptr, false, w.resolved))
-                    StartTrace(w.address, (int)std::min<size_t>(sz, 8), TraceKind::Accesses);
-                if (ImGui::MenuItem("Decompile function here", nullptr, false, w.resolved))
-                    StartDecompile(w.address);
-                if (ImGui::MenuItem("Pointer scan for this address", nullptr, false, w.resolved))
-                    OpenPointerScan(w.address);
-                ImGui::Separator();
-                if (ImGui::MenuItem("Copy address", nullptr, false, w.resolved)) ImGui::SetClipboardText(ToHex(w.address).c_str());
-                if (ImGui::MenuItem("Copy value")) ImGui::SetClipboardText(val.c_str());
-                ImGui::MenuItem("Show as hex", nullptr, &w.hex);
-                if (ImGui::MenuItem("Dereference (wrap in [ ])")) w.expression = "[" + w.expression + "]";
-                if (ImGui::MenuItem("Duplicate")) dupIdx = i;
-                ImGui::Separator();
-                if (ImGui::MenuItem("Move up", nullptr, false, i > 0)) { moveFrom = i; moveTo = i - 1; }
-                if (ImGui::MenuItem("Move down", nullptr, false, i + 1 < (int)m_watches.size())) { moveFrom = i; moveTo = i + 1; }
-                if (ImGui::MenuItem("Delete")) removeIdx = i;
+                else
+                {
+                    if (ImGui::MenuItem(ICON_EDIT "  Change value...", "Enter", false, readOk))
+                    {
+                        m_editWatch = i;
+                        snprintf(m_editBuf, sizeof(m_editBuf), "%s", val.c_str());
+                        m_openEditPopup = true;
+                    }
+                    if (ImGui::MenuItem(ICON_PIN "  Freeze", "Space", w.frozen)) setFrozen(w, !w.frozen);
+                    if (ImGui::MenuItem(ICON_CHIP "  Browse memory here", nullptr, false, w.resolved))
+                    {
+                        m_hex.GoTo(w.address);
+                        m_showHex = true;
+                        ImGui::SetWindowFocus(kWinHex);
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Find out what writes to this address", nullptr, false, w.resolved))
+                        StartTrace(w.address, (int)std::min<size_t>(sz, 8), TraceKind::Writes);
+                    if (ImGui::MenuItem("Find out what accesses this address", nullptr, false, w.resolved))
+                        StartTrace(w.address, (int)std::min<size_t>(sz, 8), TraceKind::Accesses);
+                    if (ImGui::MenuItem(ICON_CODE "  Decompile function here", nullptr, false, w.resolved))
+                        StartDecompile(w.address);
+                    if (ImGui::MenuItem(ICON_SEARCH "  Pointer scan for this address", nullptr, false, w.resolved))
+                        OpenPointerScan(w.address);
+                    if (ImGui::MenuItem(ICON_FLASH "  Make AOB signature here", nullptr, false, w.resolved))
+                        OpenSigMaker(w.address);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(ICON_COPY "  Copy address", nullptr, false, w.resolved))
+                        ImGui::SetClipboardText(ToHex(w.address).c_str());
+                    if (ImGui::MenuItem(ICON_COPY "  Copy value")) ImGui::SetClipboardText(val.c_str());
+                    ImGui::MenuItem("Show as hex", nullptr, &w.hex);
+                    if (ImGui::MenuItem("Dereference (wrap in [ ])")) w.expression = "[" + w.expression + "]";
+                    if (ImGui::MenuItem(ICON_ADD "  Duplicate", "Ctrl+D")) dupIdx = i;
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Move up", nullptr, false, i > 0)) { moveFrom = i; moveTo = i - 1; }
+                    if (ImGui::MenuItem("Move down", nullptr, false, i + 1 < (int)m_watches.size())) { moveFrom = i; moveTo = i + 1; }
+                    if (ImGui::MenuItem(ICON_DELETE "  Delete", "Del")) removeIdx = i;
+                }
                 ImGui::EndPopup();
             }
             ImGui::PopID();
         }
         ImGui::EndTable();
     }
+
+    // Structural changes after the loop, so indices stayed valid while drawing.
+    if (clickRow >= 0 && clickRow < (int)m_watches.size())
+        ClickSelect(clickRow, (int)m_watches.size(), m_watchAnchor, [&](int k) { return m_watches[k].selected; },
+                    [&](int k, bool on) { m_watches[k].selected = on; });
+    if (bulkDelete) deleteSelected();
     if (dupIdx >= 0)
     {
         WatchEntry copy = m_watches[dupIdx];
         copy.frozen = false;
+        copy.selected = false;
         m_watches.insert(m_watches.begin() + dupIdx + 1, std::move(copy));
     }
     if (removeIdx >= 0) m_watches.erase(m_watches.begin() + removeIdx);
@@ -1276,17 +1574,40 @@ void App::DrawRegions()
     ImGui::TextDisabled("%zu regions, %s committed", rows.size(), HumanSize(totalCommit).c_str());
 
     ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV |
-                         ImGuiTableFlags_Resizable;
+                         ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable;
     if (ImGui::BeginTable("##regions", 6, tf))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, Px(150));
-        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, Px(90));
+        ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort, Px(150));
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, Px(90));
         ImGui::TableSetupColumn("Protect", ImGuiTableColumnFlags_WidthFixed, Px(70));
         ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, Px(65));
         ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, Px(65));
         ImGui::TableSetupColumn("Owner", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
+
+        // The row list is rebuilt every frame, so sorting it every frame keeps the order live.
+        if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs(); specs && specs->SpecsCount > 0)
+        {
+            const ImGuiTableColumnSortSpecs s = specs->Specs[0];
+            const bool desc = s.SortDirection == ImGuiSortDirection_Descending;
+            std::stable_sort(rows.begin(), rows.end(), [&](const auto& x, const auto& y) {
+                const RegionInfo& a = *x.r;
+                const RegionInfo& b = *y.r;
+                int c = 0;
+                switch (s.ColumnIndex)
+                {
+                case 0: c = a.base < b.base ? -1 : a.base > b.base; break;
+                case 1: c = a.size < b.size ? -1 : a.size > b.size; break;
+                case 2: c = ProtectToString(a.protect).compare(ProtectToString(b.protect)); break;
+                case 3: c = (int)a.state - (int)b.state; break;
+                case 4: c = (int)a.type - (int)b.type; break;
+                case 5: c = Lower(x.owner).compare(Lower(y.owner)); break;
+                }
+                return desc ? c > 0 : c < 0;
+            });
+            specs->SpecsDirty = false;
+        }
 
         ImGuiListClipper clipper;
         clipper.Begin((int)rows.size());
@@ -1364,15 +1685,34 @@ void App::DrawModules()
     ImGui::TextDisabled("%zu modules", mods.size());
 
     ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV |
-                         ImGuiTableFlags_Resizable;
+                         ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate;
     if (ImGui::BeginTable("##mods", 4, tf))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, Px(180));
         ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, Px(150));
-        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, Px(90));
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, Px(90));
         ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
+
+        // `mods` is a fresh copy each frame; with no sort column it keeps the load order.
+        if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs(); specs && specs->SpecsCount > 0)
+        {
+            const ImGuiTableColumnSortSpecs s = specs->Specs[0];
+            const bool desc = s.SortDirection == ImGuiSortDirection_Descending;
+            std::stable_sort(mods.begin(), mods.end(), [&](const ModuleInfo& a, const ModuleInfo& b) {
+                int c = 0;
+                switch (s.ColumnIndex)
+                {
+                case 0: c = Lower(a.name).compare(Lower(b.name)); break;
+                case 1: c = a.base < b.base ? -1 : a.base > b.base; break;
+                case 2: c = a.size < b.size ? -1 : a.size > b.size; break;
+                case 3: c = Lower(a.path).compare(Lower(b.path)); break;
+                }
+                return desc ? c > 0 : c < 0;
+            });
+            specs->SpecsDirty = false;
+        }
         int i = 0;
         for (const auto& m : mods)
         {
@@ -1464,6 +1804,20 @@ void App::DrawAbout()
     ImGui::BulletText("Array of Bytes accepts wildcards: 48 8B ?? ?? 89");
     ImGui::BulletText("Green results are static (inside a module) - they survive restarts.");
     ImGui::BulletText("Double-click a result to add it to the address list.");
+    ImGui::Spacing();
+    ImGui::TextColored(kColAccent, "AOB scan (array of bytes)");
+    ImGui::BulletText("48 8B 05 ?? ?? ?? ??  -  ?? or ? is any byte; 4? and ?8 match half a byte.");
+    ImGui::BulletText("A | marks where results point: E8 | ?? ?? ?? ?? points at the call's offset.");
+    ImGui::BulletText("Code style works too: \\x48\\x8B\\x05 with a mask like xx?");
+    ImGui::BulletText("Right-click an instruction > Make AOB signature here for a pattern that survives updates.");
+    ImGui::BulletText("Save signatures in the Signature list and Scan all after the program updates.");
+    ImGui::Spacing();
+    ImGui::TextColored(kColAccent, "Lists (Scan Results, Address List)");
+    ImGui::BulletText("Click selects, Ctrl+click adds/removes a row, Shift+click selects a range.");
+    ImGui::BulletText("Ctrl+A select all, Ctrl+C copy, Esc clear selection.");
+    ImGui::BulletText("Results: Enter adds the selection to the address list.");
+    ImGui::BulletText("Address list: Enter changes values, Space freezes, Del deletes, Ctrl+D duplicates.");
+    ImGui::BulletText("Right-click acts on the whole selection. Click a column header to sort.");
     ImGui::Spacing();
     ImGui::TextColored(kColAccent, "Memory view");
     ImGui::BulletText("Type hex digits to edit, Tab to edit ASCII.");
@@ -1912,6 +2266,18 @@ void App::DrawDisasm()
                 }
             }
             ImGui::SetItemTooltip("Double-click to edit this instruction in the Memory View");
+            if (ImGui::BeginPopupContextItem("##insctx"))
+            {
+                if (ImGui::MenuItem(ICON_FLASH "  Make AOB signature here")) OpenSigMaker(r.address);
+                if (ImGui::MenuItem(ICON_CHIP "  Edit in Memory View"))
+                {
+                    m_hex.FocusDisasm(r.address);
+                    m_showHex = true;
+                    ImGui::SetWindowFocus(kWinHex);
+                }
+                if (ImGui::MenuItem(ICON_COPY "  Copy address")) ImGui::SetClipboardText(ToHex(r.address).c_str());
+                ImGui::EndPopup();
+            }
             if (selected && m_scrollToSelected)
             {
                 ImGui::SetScrollHereY(0.4f);
@@ -2535,6 +2901,31 @@ void App::DrawPointerScan()
     }
 
     const auto& results = m_ptrScan.Results();
+
+    // Keep the selection / display-order arrays in step with the current results.
+    bool resultsChanged = false;
+    if (m_ptrSelected.size() != results.size())
+    {
+        m_ptrSelected.assign(results.size(), 0);
+        m_ptrOrder.resize(results.size());
+        for (int i = 0; i < (int)results.size(); i++) m_ptrOrder[i] = i;
+        m_ptrAnchor = -1;
+        resultsChanged = true;
+    }
+
+    auto addWatchFor = [&](const PointerChain& ch) {
+        WatchEntry e;
+        e.expression = ch.Expression();
+        e.type = ValueType::Int32;
+        e.description = "Pointer";
+        m_watches.push_back(std::move(e));
+    };
+    auto selectedCount = [&]() {
+        int n = 0;
+        for (char c : m_ptrSelected) n += c ? 1 : 0;
+        return n;
+    };
+
     ImGui::Separator();
     ImGui::TextColored(kColAccent, "%zu paths", results.size());
     ImGui::SameLine();
@@ -2561,45 +2952,111 @@ void App::DrawPointerScan()
     ImGui::SetItemTooltip("After the game restarts, attach again, find the value's new address, type it here,\n"
                           "and keep only the paths that still reach it.");
 
+    // Selection toolbar.
+    int selN = selectedCount();
+    ImGui::BeginDisabled(selN == 0);
+    if (ImGui::Button(selN > 1 ? "Add selected to list" : "Add to list"))
+        for (size_t ri = 0; ri < results.size(); ri++) if (m_ptrSelected[ri]) addWatchFor(results[ri]);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(results.empty());
+    if (ImGui::Button("Select all")) std::fill(m_ptrSelected.begin(), m_ptrSelected.end(), (char)1);
+    ImGui::SameLine();
+    if (ImGui::Button("Clear")) { std::fill(m_ptrSelected.begin(), m_ptrSelected.end(), (char)0); m_ptrAnchor = -1; }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d selected  -  shift/ctrl-click to multi-select", selN);
+
     if (ImGui::BeginTable("##ptrres", 3,
                           ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
-                          ImGuiTableFlags_BordersInnerV))
+                          ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, Px(180));
-        ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Resolves to", ImGuiTableColumnFlags_WidthFixed, Px(130));
+        ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort, Px(180), 0);
+        ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch, 0, 1);
+        ImGui::TableSetupColumn("Resolves to", ImGuiTableColumnFlags_WidthFixed, Px(130), 2);
         ImGui::TableHeadersRow();
+
+        // (Re)sort the display order when the user clicks a header or the results change.
+        if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs())
+        {
+            if (specs->SpecsDirty || resultsChanged)
+            {
+                int col = specs->SpecsCount > 0 ? specs->Specs[0].ColumnUserID : 0;
+                bool asc = specs->SpecsCount == 0 || specs->Specs[0].SortDirection != ImGuiSortDirection_Descending;
+                std::sort(m_ptrOrder.begin(), m_ptrOrder.end(), [&](int a, int b) {
+                    const PointerChain& x = results[a];
+                    const PointerChain& y = results[b];
+                    bool less;
+                    if (col == 1) // Path: by depth then text
+                        less = x.offsets.size() != y.offsets.size() ? x.offsets.size() < y.offsets.size()
+                                                                    : x.Expression() < y.Expression();
+                    else if (col == 2) // Resolves to
+                        less = x.resolved < y.resolved;
+                    else // Base: static first, then module+offset / address
+                        less = x.base < y.base;
+                    return asc ? less : !less;
+                });
+                specs->SpecsDirty = false;
+            }
+        }
 
         if (m_mono) ImGui::PushFont(m_mono);
         ImGuiListClipper clip;
-        clip.Begin((int)results.size());
+        clip.Begin((int)m_ptrOrder.size());
         while (clip.Step())
         {
-            for (int i = clip.DisplayStart; i < clip.DisplayEnd; i++)
+            for (int d = clip.DisplayStart; d < clip.DisplayEnd; d++)
             {
-                const PointerChain& ch = results[i];
+                int ri = m_ptrOrder[d];
+                const PointerChain& ch = results[ri];
                 ImGui::TableNextRow();
-                ImGui::PushID(i);
+                ImGui::PushID(ri);
 
                 ImGui::TableNextColumn();
                 std::string baseText = ch.staticBase ? (ch.module + "+" + ToHex(ch.baseOffset)) : ToHex(ch.base);
                 if (ch.staticBase) ImGui::PushStyleColor(ImGuiCol_Text, kColOk);
-                bool sel = (m_ptrSel == i);
-                if (ImGui::Selectable(baseText.c_str(), sel, ImGuiSelectableFlags_SpanAllColumns)) m_ptrSel = i;
+                bool sel = m_ptrSelected[ri] != 0;
+                // Render for visuals/hover only; drive selection from IsItemClicked so Ctrl/Shift
+                // clicks register reliably (Selectable's return value can swallow modified clicks).
+                ImGui::Selectable(baseText.c_str(), sel, ImGuiSelectableFlags_SpanAllColumns);
                 if (ch.staticBase) ImGui::PopStyleColor();
 
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+                {
+                    ImGuiIO& io = ImGui::GetIO();
+                    if (io.KeyShift && m_ptrAnchor >= 0 && m_ptrAnchor < (int)m_ptrOrder.size())
+                    {
+                        int a = std::min(m_ptrAnchor, d), b = std::max(m_ptrAnchor, d);
+                        if (!io.KeyCtrl) std::fill(m_ptrSelected.begin(), m_ptrSelected.end(), (char)0);
+                        for (int k = a; k <= b; k++) m_ptrSelected[m_ptrOrder[k]] = 1;
+                    }
+                    else if (io.KeyCtrl)
+                    {
+                        m_ptrSelected[ri] = m_ptrSelected[ri] ? 0 : 1;
+                        m_ptrAnchor = d;
+                    }
+                    else
+                    {
+                        std::fill(m_ptrSelected.begin(), m_ptrSelected.end(), (char)0);
+                        m_ptrSelected[ri] = 1;
+                        m_ptrAnchor = d;
+                    }
+                }
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && !sel)
+                {
+                    std::fill(m_ptrSelected.begin(), m_ptrSelected.end(), (char)0);
+                    m_ptrSelected[ri] = 1;
+                    m_ptrAnchor = d;
+                }
                 std::string expr = ch.Expression();
                 if (ImGui::BeginPopupContextItem("##pctx"))
                 {
-                    m_ptrSel = i;
-                    if (ImGui::MenuItem("Add to address list"))
+                    int sc = selectedCount();
+                    if (ImGui::MenuItem(sc > 1 ? "Add selected to address list" : "Add to address list"))
                     {
-                        WatchEntry e;
-                        e.expression = expr;
-                        e.type = ValueType::Int32;
-                        e.description = "Pointer";
-                        m_watches.push_back(std::move(e));
+                        if (sc > 1) { for (size_t k = 0; k < results.size(); k++) if (m_ptrSelected[k]) addWatchFor(results[k]); }
+                        else addWatchFor(ch);
                     }
                     if (ImGui::MenuItem("Copy path")) ImGui::SetClipboardText(expr.c_str());
                     if (ImGui::MenuItem("Browse memory here")) { m_hex.GoTo(ch.resolved); m_showHex = true; }
@@ -2620,6 +3077,653 @@ void App::DrawPointerScan()
     }
 
     ImGui::End();
+}
+
+// ---------------------------------------------------------------------------
+// AOB scan: pattern search, signature maker, signature list
+
+AobScanOptions App::AobOptions() const
+{
+    AobScanOptions o;
+    o.executableOnly = m_aobExecOnly;
+    o.writableOnly = m_aobWritableOnly;
+    o.includeMapped = m_aobIncludeMapped;
+    if (m_aobScope > 0 && m_aobScope <= (int)m_aobModules.size())
+    {
+        const ModuleInfo& m = m_aobModules[m_aobScope - 1];
+        o.start = m.base;
+        o.end = m.base + m.size;
+    }
+    return o;
+}
+
+void App::StartAobScan()
+{
+    AobPattern p;
+    std::string err;
+    if (!p.Parse(m_aobPattern, err) || !m_aob.Start(m_proc, p, AobOptions(), err)) m_aobStatus = err;
+    else m_aobStatus.clear();
+}
+
+void App::OpenAobScan(const std::string& pattern, bool run)
+{
+    snprintf(m_aobPattern, sizeof(m_aobPattern), "%s", pattern.c_str());
+    m_showAob = true;
+    m_aobTabRequest = 0;
+    ImGui::SetWindowFocus(kWinAob);
+    if (run && m_proc.IsOpen() && !m_aob.Busy()) StartAobScan();
+}
+
+void App::OpenSigMaker(uint64_t address)
+{
+    snprintf(m_sigAddress, sizeof(m_sigAddress), "%s", m_proc.Symbolize(address).c_str());
+    m_showAob = true;
+    m_aobTabRequest = 1;
+    ImGui::SetWindowFocus(kWinAob);
+    auto t0 = std::chrono::steady_clock::now();
+    m_sigResult = MakeSignature(m_proc, address, m_sigOpts);
+    m_sigMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    m_sigAt = address;
+    m_sigHave = true;
+}
+
+void App::DrawAobScan()
+{
+    ImGui::SetNextWindowSize(ImVec2(Px(900), Px(580)), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(kWinAob, &m_showAob))
+    {
+        ImGui::End();
+        return;
+    }
+    if (!m_proc.IsOpen())
+    {
+        if (Glass::EmptyState(ICON_FLASH, "No process", "Attach to a process to search its memory for byte patterns.",
+                              ICON_LINK "  Attach to process"))
+            m_openPicker = true;
+        ImGui::End();
+        return;
+    }
+    if (ImGui::BeginTabBar("##aobtabs"))
+    {
+        auto tab = [&](const char* label, int idx) {
+            return ImGui::BeginTabItem(label, nullptr, m_aobTabRequest == idx ? ImGuiTabItemFlags_SetSelected : 0);
+        };
+        if (tab(ICON_SEARCH "  Scan", 0))
+        {
+            DrawAobScanTab();
+            ImGui::EndTabItem();
+        }
+        if (tab(ICON_EDIT "  Signature maker", 1))
+        {
+            DrawSigMakerTab();
+            ImGui::EndTabItem();
+        }
+        if (tab(ICON_LIST "  Signature list", 2))
+        {
+            DrawSigListTab();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    m_aobTabRequest = -1;
+    ImGui::End();
+}
+
+void App::DrawAobScanTab()
+{
+    const bool busy = m_aob.Busy();
+    AobPattern parsed;
+    std::string perr;
+    const bool valid = m_aobPattern[0] && parsed.Parse(m_aobPattern, perr);
+
+    // Pattern + Scan.
+    const float btnW = Px(112);
+    ImGui::SetNextItemWidth(-btnW - ImGui::GetStyle().ItemSpacing.x);
+    if (m_mono) ImGui::PushFont(m_mono);
+    bool enter = ImGui::InputTextWithHint("##aobpat", "48 8B 05 ?? ?? ?? ??   or   \\x48\\x8B\\x05 xxx", m_aobPattern,
+                                          sizeof(m_aobPattern), ImGuiInputTextFlags_EnterReturnsTrue);
+    if (m_mono) ImGui::PopFont();
+    ImGui::SameLine();
+    if (busy)
+    {
+        if (ImGui::Button(ICON_STOP "  Cancel", ImVec2(btnW, 0))) m_aob.Cancel();
+    }
+    else
+    {
+        ImGui::BeginDisabled(!valid);
+        if (Glass::AccentButton(ICON_SEARCH "  Scan", ImVec2(btnW, 0)) || (enter && valid)) StartAobScan();
+        ImGui::EndDisabled();
+    }
+
+    // What the pattern parsed to.
+    if (!m_aobPattern[0])
+        ImGui::TextDisabled("?? any byte   4? / ?8 half a byte   | where results point   \\x48\\x8B + xx? mask also works");
+    else if (!valid) ImGui::TextColored(kColErr, ICON_WARNING " %s", perr.c_str());
+    else
+    {
+        const int wild = (int)parsed.Size() - parsed.SolidBytes();
+        ImGui::TextDisabled("%zu bytes, %d with wildcards", parsed.Size(), wild);
+        if (parsed.resultOffset)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("- results point %d bytes in", parsed.resultOffset);
+        }
+        if (strstr(m_aobPattern, "\\x") || strstr(m_aobPattern, "\\X"))
+        {
+            ImGui::SameLine();
+            if (m_mono) ImGui::PushFont(m_mono);
+            ImGui::TextColored(kColAccent, "%s", parsed.ToIda().c_str());
+            if (m_mono) ImGui::PopFont();
+        }
+    }
+
+    // Where to look.
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("In");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(Px(230));
+    const bool scoped = m_aobScope > 0 && m_aobScope <= (int)m_aobModules.size();
+    if (ImGui::BeginCombo("##aobscope", scoped ? m_aobModules[m_aobScope - 1].name.c_str() : "All memory"))
+    {
+        if (ImGui::IsWindowAppearing())
+        {
+            // Refresh the module list, keeping the current choice by name.
+            std::string keep = scoped ? m_aobModules[m_aobScope - 1].name : "";
+            m_aobModules = m_proc.Modules();
+            m_aobScope = 0;
+            for (size_t k = 0; k < m_aobModules.size(); k++)
+                if (m_aobModules[k].name == keep) m_aobScope = (int)k + 1;
+        }
+        if (ImGui::Selectable("All memory", m_aobScope == 0)) m_aobScope = 0;
+        ImGui::Separator();
+        for (size_t k = 0; k < m_aobModules.size(); k++)
+            if (ImGui::Selectable(m_aobModules[k].name.c_str(), m_aobScope == (int)k + 1)) m_aobScope = (int)k + 1;
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Executable only", &m_aobExecOnly);
+    ImGui::SetItemTooltip("Search code only - where signatures normally live. Turn off to search data too.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Writable only", &m_aobWritableOnly);
+    ImGui::SameLine();
+    ImGui::Checkbox("Mapped", &m_aobIncludeMapped);
+    ImGui::SetItemTooltip("Also search file mappings and shared sections");
+
+    // Status.
+    const auto& res = m_aob.Results();
+    const AobPattern& pat = m_aob.Pattern();
+    const bool scanned = !pat.Empty();
+    if (busy)
+    {
+        char overlay[48];
+        snprintf(overlay, sizeof(overlay), "Searching %.0f%%", m_aob.Progress() * 100.f);
+        ImGui::ProgressBar(m_aob.Progress(), ImVec2(-FLT_MIN, 0), overlay);
+        return;
+    }
+    if (!m_aobStatus.empty()) ImGui::TextColored(kColErr, ICON_WARNING " %s", m_aobStatus.c_str());
+    else if (scanned)
+    {
+        ImGui::TextColored(res.size() == 1 ? kColOk : kColAccent, "%zu%s %s", res.size(), m_aob.Truncated() ? "+" : "",
+                           res.size() == 1 ? "match (unique)" : "matches");
+        ImGui::SameLine();
+        ImGui::TextDisabled("in %.0f ms, %s searched", m_aob.LastDurationMs(), HumanSize(m_aob.BytesScanned()).c_str());
+        if (m_aob.Truncated())
+        {
+            ImGui::SameLine();
+            ImGui::TextColored(kColChanged, "- stopped at the result limit");
+        }
+        if (!m_aob.LastError().empty())
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%s)", m_aob.LastError().c_str());
+        }
+    }
+
+    if (res.empty())
+    {
+        if (scanned)
+            Glass::EmptyState(ICON_SEARCH, "No matches",
+                              "Nothing in the chosen memory matches. Try fewer bytes, more wildcards, All memory, or "
+                              "turning off Executable only.");
+        else
+            Glass::EmptyState(ICON_FLASH, "Find code by its bytes",
+                              "Type a pattern and press Enter. To make one that survives updates, right-click an "
+                              "instruction and choose Make AOB signature here.");
+        return;
+    }
+
+    // Selection actions.
+    m_aobSel.Resize(res.size());
+    auto copySelected = [&](bool symbolic) {
+        std::string text;
+        m_aobSel.ForEach([&](size_t k) { text += (symbolic ? m_proc.Symbolize(res[k]) : ToHex(res[k])) + "\n"; });
+        ImGui::SetClipboardText(text.c_str());
+    };
+    auto addSelected = [&] {
+        size_t n = 0;
+        m_aobSel.ForEach([&](size_t k) {
+            if (n++ < 5000) AddWatch(res[k], ValueType::ByteArray, (int)std::max<size_t>(pat.Size(), 8));
+        });
+    };
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput)
+    {
+        const bool ctrl = ImGui::GetIO().KeyCtrl;
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) m_aobSel.SelectAll();
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_C, false) && m_aobSel.Count()) copySelected(false);
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) m_aobSel.Clear();
+    }
+
+    ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV |
+                         ImGuiTableFlags_Resizable;
+    if (ImGui::BeginTable("##aobres", 4, tf))
+    {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("Instruction", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+        ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+        ImGui::TableHeadersRow();
+
+        if (m_mono) ImGui::PushFont(m_mono);
+        const float space = ImGui::CalcTextSize(" ").x;
+        ImGuiListClipper clipper;
+        clipper.Begin((int)res.size());
+        while (clipper.Step())
+        {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+            {
+                const uint64_t a = res[i];
+                const uint64_t start = a - (uint64_t)(int64_t)pat.resultOffset;
+                const AobInsn insn = AobDecode(m_proc, start);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::PushID(i);
+                ModuleInfo mod;
+                const bool isStatic = m_proc.ModuleFromAddress(a, mod);
+                if (isStatic) ImGui::PushStyleColor(ImGuiCol_Text, kColOk);
+                if (ImGui::Selectable(m_proc.Symbolize(a).c_str(), m_aobSel.Get(i),
+                                      ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
+                {
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                    {
+                        m_hex.FocusDisasm(start);
+                        m_showHex = true;
+                        ImGui::SetWindowFocus(kWinHex);
+                    }
+                    else m_aobSel.Click(i);
+                }
+                if (isStatic) ImGui::PopStyleColor();
+                ImGui::SetItemTooltip("Double-click to open in the Memory View's disassembly");
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) m_aobSel.SelectForContextMenu(i);
+                if (ImGui::BeginPopupContextItem("##aobctx"))
+                {
+                    if (m_mono) ImGui::PopFont();
+                    const size_t n = m_aobSel.Count();
+                    if (ImGui::MenuItem(ICON_CHIP "  Disassemble here")) { m_hex.FocusDisasm(start); m_showHex = true; ImGui::SetWindowFocus(kWinHex); }
+                    if (ImGui::MenuItem(ICON_CHIP "  Browse memory here")) { m_hex.GoTo(a); m_showHex = true; ImGui::SetWindowFocus(kWinHex); }
+                    if (ImGui::MenuItem(ICON_FORWARD "  Follow target", nullptr, false, insn.hasTarget))
+                    {
+                        m_hex.GoTo(insn.target);
+                        m_showHex = true;
+                        ImGui::SetWindowFocus(kWinHex);
+                    }
+                    if (ImGui::MenuItem(ICON_CODE "  Decompile function here")) StartDecompile(start);
+                    if (ImGui::MenuItem(ICON_FLASH "  Make AOB signature here")) OpenSigMaker(start);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(n > 1 ? (ICON_ADD "  Add " + std::to_string(n) + " selected to address list").c_str()
+                                              : ICON_ADD "  Add to address list"))
+                        addSelected();
+                    if (ImGui::MenuItem(n > 1 ? ICON_COPY "  Copy selected addresses" : ICON_COPY "  Copy address", "Ctrl+C"))
+                        copySelected(false);
+                    if (ImGui::MenuItem(ICON_COPY "  Copy as module+offset")) copySelected(true);
+                    if (ImGui::MenuItem(ICON_COPY "  Copy target", nullptr, false, insn.hasTarget))
+                        ImGui::SetClipboardText(ToHex(insn.target).c_str());
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Select all", "Ctrl+A")) m_aobSel.SelectAll();
+                    ImGui::EndPopup();
+                    if (m_mono) ImGui::PushFont(m_mono);
+                }
+                ImGui::PopID();
+
+                // The matched bytes; the pattern's wildcard positions are dimmed.
+                ImGui::TableNextColumn();
+                uint8_t bytes[24] = {};
+                const size_t show = std::min<size_t>(pat.Size(), sizeof(bytes));
+                const size_t got = m_proc.Read(start, bytes, show);
+                for (size_t k = 0; k < show; k++)
+                {
+                    if (k) ImGui::SameLine(0, space);
+                    char hx[4];
+                    snprintf(hx, sizeof(hx), "%02X", bytes[k]);
+                    if (k >= got) ImGui::TextDisabled("??");
+                    else if (pat.mask[k] != 0xFF) ImGui::TextDisabled("%s", hx);
+                    else ImGui::TextUnformatted(hx);
+                }
+                if (pat.Size() > show)
+                {
+                    ImGui::SameLine(0, space);
+                    ImGui::TextDisabled("...");
+                }
+
+                ImGui::TableNextColumn();
+                if (insn.ok) ImGui::TextColored(kColAccent, "%s", insn.text.c_str());
+                else ImGui::TextDisabled("(not code)");
+
+                ImGui::TableNextColumn();
+                if (insn.hasTarget) ImGui::TextUnformatted(m_proc.Symbolize(insn.target).c_str());
+                else ImGui::TextDisabled("-");
+            }
+        }
+        if (m_mono) ImGui::PopFont();
+        ImGui::EndTable();
+    }
+}
+
+void App::DrawSigMakerTab()
+{
+    ImGui::TextDisabled("Builds the shortest byte pattern that finds this code again after the program restarts or updates.");
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Address");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(Px(280));
+    if (m_mono) ImGui::PushFont(m_mono);
+    bool enter = ImGui::InputTextWithHint("##sigaddr", "game.exe+1F00", m_sigAddress, sizeof(m_sigAddress),
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
+    if (m_mono) ImGui::PopFont();
+    ImGui::SameLine();
+    if (Glass::AccentButton(ICON_FLASH "  Generate") || enter)
+    {
+        uint64_t a = 0;
+        std::string err;
+        if (EvaluateAddress(m_proc, m_sigAddress, a, &err)) OpenSigMaker(a);
+        else
+        {
+            m_sigResult = SigMakerResult();
+            m_sigResult.error = "Address: " + err;
+            m_sigHave = true;
+        }
+    }
+
+    ImGui::Checkbox("Wildcard relative addresses", &m_sigOpts.wildcardRelative);
+    ImGui::SetItemTooltip("Call/jump targets, RIP-relative operands and absolute pointers into modules.\n"
+                          "These change whenever the code moves, so leave this on.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Also 32-bit offsets and constants", &m_sigOpts.wildcardWide);
+    ImGui::SetItemTooltip("Wildcards large struct offsets and immediates too. Survives more updates but\n"
+                          "needs more bytes to be unique.");
+    ImGui::Checkbox("Unique across all executable memory", &m_sigOpts.wholeProcess);
+    ImGui::SetItemTooltip("Off: unique within the module the address belongs to (what you normally want).");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(StepperWidth(40));
+    ImGui::InputInt("Max bytes", &m_sigOpts.maxBytes, 8, 32);
+    m_sigOpts.maxBytes = std::clamp(m_sigOpts.maxBytes, 8, 512);
+    ImGui::Separator();
+
+    if (!m_sigHave)
+    {
+        Glass::EmptyState(ICON_EDIT, "Make a signature",
+                          "Right-click an instruction in the Memory View, the Disassembly tab or a scan result and "
+                          "choose Make AOB signature here - or type an address above.");
+        return;
+    }
+    const SigMakerResult& r = m_sigResult;
+    if (!r.ok)
+    {
+        ImGui::TextColored(kColErr, ICON_WARNING " %s", r.error.c_str());
+        return;
+    }
+
+    const AobPattern& p = r.pattern;
+    const int wild = (int)p.Size() - p.SolidBytes();
+    if (r.unique) ImGui::TextColored(kColOk, ICON_SHIELD_FILL " Unique in %s", r.scope.c_str());
+    else ImGui::TextColored(kColChanged, ICON_WARNING " %s", r.error.c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu bytes, %d instructions, %d wildcarded, %.0f ms", p.Size(), r.instructions, wild, m_sigMs);
+
+    // Copyable forms.
+    std::string ida = p.ToIda(), code = p.ToCodeBytes(), mask = p.ToCodeMask();
+    auto field = [&](const char* label, std::string& value, const char* id) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", label);
+        ImGui::SameLine(Px(70));
+        ImGui::SetNextItemWidth(-Px(80));
+        if (m_mono) ImGui::PushFont(m_mono);
+        ImGui::InputText(id, &value, ImGuiInputTextFlags_ReadOnly);
+        if (m_mono) ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::PushID(id);
+        if (ImGui::Button(ICON_COPY " Copy", ImVec2(-FLT_MIN, 0))) ImGui::SetClipboardText(value.c_str());
+        ImGui::PopID();
+    };
+    field("Pattern", ida, "##sigida");
+    field("Bytes", code, "##sigcode");
+    field("Mask", mask, "##sigmask");
+
+    if (Glass::AccentButton(ICON_SEARCH "  Scan for it")) OpenAobScan(ida, true);
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_ADD "  Add to signature list"))
+    {
+        SigEntry e;
+        e.name = m_proc.Symbolize(m_sigAt);
+        e.pattern = ida;
+        m_sigList.push_back(e);
+        m_aobTabRequest = 2;
+    }
+    ImGui::Spacing();
+
+    // The instructions the pattern covers, with wildcarded bytes dimmed.
+    ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
+    if (ImGui::BeginTable("##siginsns", 3, tf))
+    {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+        ImGui::TableSetupColumn("Pattern bytes", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Instruction", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableHeadersRow();
+        if (m_mono) ImGui::PushFont(m_mono);
+        const float space = ImGui::CalcTextSize(" ").x;
+        uint64_t at = m_sigAt;
+        size_t pos = 0;
+        for (int n = 0; n < r.instructions && pos < p.Size(); n++)
+        {
+            AobInsn insn = AobDecode(m_proc, at);
+            if (!insn.ok || insn.length <= 0) break;
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", m_proc.Symbolize(at).c_str());
+            ImGui::TableNextColumn();
+            for (int k = 0; k < insn.length && pos < p.Size(); k++, pos++)
+            {
+                if (k) ImGui::SameLine(0, space);
+                if (p.mask[pos] == 0xFF) ImGui::Text("%02X", p.bytes[pos]);
+                else ImGui::TextDisabled("??");
+            }
+            ImGui::TableNextColumn();
+            ImGui::TextColored(kColAccent, "%s", insn.text.c_str());
+            at += insn.length;
+        }
+        if (m_mono) ImGui::PopFont();
+        ImGui::EndTable();
+    }
+}
+
+void App::DrawSigListTab()
+{
+    auto scanOne = [&](SigEntry& e) {
+        AobPattern p;
+        e.scanned = true;
+        e.matches = 0;
+        e.first = 0;
+        if (!p.Parse(e.pattern, e.error)) return;
+        auto hits = AobFind(m_proc, p, AobOptions(), 1000);
+        e.matches = hits.size();
+        e.first = hits.empty() ? 0 : hits.front();
+    };
+
+    // New entry row.
+    ImGui::SetNextItemWidth(Px(170));
+    ImGui::InputTextWithHint("##signame", "Name", m_sigNewName, sizeof(m_sigNewName));
+    ImGui::SameLine();
+    const float addW = Px(90);
+    ImGui::SetNextItemWidth(-addW - ImGui::GetStyle().ItemSpacing.x);
+    if (m_mono) ImGui::PushFont(m_mono);
+    bool enter = ImGui::InputTextWithHint("##sigpat", "Pattern, e.g. 48 8B 05 ?? ?? ?? ??", m_sigNewPattern,
+                                          sizeof(m_sigNewPattern), ImGuiInputTextFlags_EnterReturnsTrue);
+    if (m_mono) ImGui::PopFont();
+    ImGui::SameLine();
+    if ((ImGui::Button(ICON_ADD " Add", ImVec2(addW, 0)) || enter) && m_sigNewPattern[0])
+    {
+        SigEntry e;
+        e.name = m_sigNewName[0] ? m_sigNewName : "Signature " + std::to_string(m_sigList.size() + 1);
+        e.pattern = m_sigNewPattern;
+        m_sigList.push_back(e);
+        m_sigNewName[0] = m_sigNewPattern[0] = 0;
+    }
+
+    ImGui::BeginDisabled(m_sigList.empty());
+    if (Glass::AccentButton(ICON_PLAY "  Scan all"))
+        for (auto& e : m_sigList) scanOne(e);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Load...")) LoadSigList();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(m_sigList.empty());
+    if (ImGui::Button("Save...")) SaveSigList();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu signatures - searched with the Scan tab's memory options", m_sigList.size());
+
+    if (m_sigList.empty())
+    {
+        Glass::EmptyState(ICON_LIST, "No signatures yet",
+                          "Add patterns here or from the Signature maker, then save the list. After the program "
+                          "updates, load it and Scan all to find everything again.");
+        return;
+    }
+
+    int remove = -1;
+    ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV |
+                         ImGuiTableFlags_Resizable;
+    if (ImGui::BeginTable("##siglist", 5, tf))
+    {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+        ImGui::TableSetupColumn("Pattern", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+        ImGui::TableSetupColumn("Matches", ImGuiTableColumnFlags_WidthFixed, Px(80));
+        ImGui::TableSetupColumn("First match", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed,
+                                SmallButtonWidth("Scan") + ImGui::GetStyle().ItemSpacing.x + SmallButtonWidth(ICON_DELETE));
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < (int)m_sigList.size(); i++)
+        {
+            SigEntry& e = m_sigList[i];
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputText("##n", &e.name);
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (m_mono) ImGui::PushFont(m_mono);
+            if (ImGui::InputText("##p", &e.pattern)) e.scanned = false;
+            if (m_mono) ImGui::PopFont();
+
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            if (!e.scanned) ImGui::TextDisabled("-");
+            else if (!e.error.empty())
+            {
+                ImGui::TextColored(kColErr, "error");
+                ImGui::SetItemTooltip("%s", e.error.c_str());
+            }
+            else if (e.matches == 0) ImGui::TextColored(kColErr, "none");
+            else if (e.matches == 1) ImGui::TextColored(kColOk, "unique");
+            else ImGui::TextColored(kColChanged, "%zu%s", e.matches, e.matches >= 1000 ? "+" : "");
+
+            ImGui::TableNextColumn();
+            if (e.scanned && e.matches)
+            {
+                if (m_mono) ImGui::PushFont(m_mono);
+                if (ImGui::Selectable(m_proc.Symbolize(e.first).c_str()))
+                {
+                    m_hex.FocusDisasm(e.first);
+                    m_showHex = true;
+                    ImGui::SetWindowFocus(kWinHex);
+                }
+                if (m_mono) ImGui::PopFont();
+                ImGui::SetItemTooltip("Open in the Memory View's disassembly");
+            }
+
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("Scan")) scanOne(e);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_DELETE)) remove = i;
+            ImGui::SetItemTooltip("Remove from the list");
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (remove >= 0) m_sigList.erase(m_sigList.begin() + remove);
+}
+
+// Signature lists are plain text: one "name = pattern" per line, # starts a comment.
+void App::SaveSigList()
+{
+    std::wstring path = L"signatures.sig";
+    if (!FileDialog((HWND)m_hwnd, true, L"Signature list (*.sig)\0*.sig\0Text files\0*.txt\0All files\0*.*\0", L"sig", path))
+        return;
+    std::ofstream f(path, std::ios::binary);
+    if (!f)
+    {
+        Log("Could not write the signature list");
+        return;
+    }
+    f << "# Memory Browser signatures: name = pattern\n";
+    for (const auto& e : m_sigList)
+    {
+        std::string n = e.name;
+        std::replace(n.begin(), n.end(), '=', '-');
+        f << n << " = " << e.pattern << "\n";
+    }
+    Log("Saved " + std::to_string(m_sigList.size()) + " signatures");
+}
+
+void App::LoadSigList()
+{
+    std::wstring path;
+    if (!FileDialog((HWND)m_hwnd, false, L"Signature list (*.sig)\0*.sig\0Text files\0*.txt\0All files\0*.*\0", L"sig", path))
+        return;
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+    {
+        Log("Could not open the signature list");
+        return;
+    }
+    auto trim = [](std::string s) {
+        size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+        return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+    };
+    size_t added = 0;
+    std::string line;
+    while (std::getline(f, line))
+    {
+        line = trim(line);
+        if (line.empty() || line[0] == '#') continue;
+        SigEntry e;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) e.pattern = line;
+        else
+        {
+            e.name = trim(line.substr(0, eq));
+            e.pattern = trim(line.substr(eq + 1));
+        }
+        if (e.name.empty()) e.name = "Signature " + std::to_string(m_sigList.size() + 1);
+        if (e.pattern.empty()) continue;
+        m_sigList.push_back(e);
+        added++;
+    }
+    Log("Loaded " + std::to_string(added) + " signatures");
 }
 
 void App::SaveTable()
