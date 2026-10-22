@@ -523,6 +523,7 @@ void HexView::DrawDisasm(Process& proc)
     };
 
     ImGui::SameLine();
+    if (m_refocusAsm) { ImGui::SetKeyboardFocusHere(); m_refocusAsm = false; }
     ImGui::SetNextItemWidth(Px(330));
     bool enter = ImGui::InputTextWithHint("##asm", "type asm, or Tab to load this instruction", m_asmInput,
                                           sizeof(m_asmInput),
@@ -535,6 +536,7 @@ void HexView::DrawDisasm(Process& proc)
     ImGui::SameLine();
     if ((ImGui::Button("Assemble") || enter) && m_asmInput[0])
     {
+        if (enter) m_refocusAsm = true; // stay in the box so you can keep assembling
         std::vector<uint8_t> bytes;
         std::string err;
         if (!AssembleInstruction(m_asmInput, proc.Is64(), m_cursor, bytes, err)) m_asmStatus = "x " + err;

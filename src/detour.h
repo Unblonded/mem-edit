@@ -17,7 +17,8 @@ struct Detour
     uint64_t target = 0;             // redirect destination, or the cave address
     uint64_t cave = 0;               // allocated cave (0 for a plain redirect)
     size_t caveSize = 0;
-    size_t caveUserSize = 0;         // editable region at the start of the cave
+    size_t caveUserSize = 0;         // size of the editable free region in the cave
+    size_t caveFreeOff = 0;          // offset of the free region within the cave (see InstallTrampoline)
     size_t stolenLen = 0;
     std::string kind;                // "redirect" or "trampoline"
     std::string location;
@@ -49,6 +50,13 @@ public:
     // value, letting it grow past the original immediate width. The widened instruction goes in the
     // cave's free bytes and the stolen copy of it is NOP'd, so the new value takes effect.
     bool SetCaveImmediate(const Process& proc, uint64_t entry, uint64_t value, std::string& error);
+
+    // Replaces the instruction at `addr` inside a cave's free region with `newInsn`, reflowing the
+    // instructions after it: a larger instruction pushes them down (into the NOP padding), a smaller
+    // one pulls them up and re-pads with NOPs. RIP-relative and relative operands in the shifted
+    // instructions are fixed for their new address. Fails if the result won't fit the free region.
+    bool EditCaveCode(const Process& proc, uint64_t addr, const std::vector<uint8_t>& newInsn,
+                      std::string& error);
 
     void SetEnabled(const Process& proc, uint64_t entry, bool enabled);
     void Remove(const Process& proc, uint64_t entry);  // restores original, frees the cave

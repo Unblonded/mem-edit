@@ -255,9 +255,41 @@ bool DetourManager::InstallTrampoline(const Process& proc, uint64_t entry, size_
         return false;
     }
 
-    // cave = [user NOPs][stolen bytes][jump back to entry+stolen]
-    size_t jmpBack = jsz;
-    size_t caveSize = userBytes + stolen + jmpBack;
+    std::vector<uint8_t> relocated = original;
+
+    // If the stolen block ENDS in an unconditional transfer (jmp/ret), control leaves there and
+    // never falls through, so the free bytes must go BEFORE that trailing instruction. Otherwise
+    // the block falls through and we append a jump back to entry+stolen after the free bytes.
+    //   trailing transfer : [head stolen][free NOPs][trailing jmp/ret]
+    //   falls through      : [stolen     ][free NOPs][jump back]
+    size_t headLen = stolen;        // bytes that fall through; free region goes right after them
+    size_t tailLen = 0;             // trailing unconditional transfer kept after the free region
+    {
+        ZydisDecoder ddec;
+        ZydisDecoderInit(&ddec, x64 ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
+                         x64 ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
+        size_t off = 0, lastOff = 0, lastLen = 0;
+        ZydisMnemonic lastM = ZYDIS_MNEMONIC_INVALID;
+        while (off < original.size())
+        {
+            ZydisDecodedInstruction ins;
+            if (!ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&ddec, nullptr, original.data() + off,
+                                                            original.size() - off, &ins)))
+                break;
+            lastOff = off; lastLen = ins.length; lastM = ins.mnemonic;
+            off += ins.length;
+        }
+        // An unconditional jmp or a ret transfers control away (conditional jccs still fall through).
+        if (lastLen && (lastM == ZYDIS_MNEMONIC_JMP || lastM == ZYDIS_MNEMONIC_RET))
+        {
+            headLen = lastOff;
+            tailLen = lastLen;
+        }
+    }
+    const bool fallsThrough = (tailLen == 0);
+
+    size_t jmpBack = fallsThrough ? jsz : 0;
+    size_t caveSize = stolen + userBytes + jmpBack;
     // Prefer a cave within +/-2GB of the entry so stolen RIP-relative accesses still reach.
     LPVOID cave = AllocNear(proc.Handle(), entry, caveSize);
     if (!cave)
@@ -269,16 +301,35 @@ bool DetourManager::InstallTrampoline(const Process& proc, uint64_t entry, size_
     }
     uint64_t caveAddr = (uint64_t)cave;
 
-    std::vector<uint8_t> caveBytes(caveSize, 0x90);
-    std::vector<uint8_t> relocated = original;
-    if (!RelocateStolen(x64, entry, caveAddr + userBytes, relocated, error))
+    // Relocate the stolen bytes against their real position: head stays at the cave start, the
+    // trailing transfer moves down past the free region to caveAddr + headLen + userBytes.
+    if (!RelocateStolen(x64, entry, caveAddr, relocated, error))
     {
         VirtualFreeEx(proc.Handle(), cave, 0, MEM_RELEASE);
         return false;
     }
-    memcpy(caveBytes.data() + userBytes, relocated.data(), stolen);
-    std::vector<uint8_t> back = MakeJump(caveAddr + userBytes + stolen, entry + stolen, x64);
-    memcpy(caveBytes.data() + userBytes + stolen, back.data(), back.size());
+    if (tailLen)
+    {
+        // Re-relocate just the trailing instruction for its shifted address (it moved by userBytes).
+        std::vector<uint8_t> tail(original.begin() + headLen, original.end());
+        if (!RelocateStolen(x64, entry + headLen, caveAddr + headLen + userBytes, tail, error))
+        {
+            VirtualFreeEx(proc.Handle(), cave, 0, MEM_RELEASE);
+            return false;
+        }
+        memcpy(relocated.data() + headLen, tail.data(), tail.size());
+    }
+
+    std::vector<uint8_t> caveBytes(caveSize, 0x90);
+    memcpy(caveBytes.data(), relocated.data(), headLen);                 // head (falls through)
+    // free region: [headLen, headLen + userBytes) stays NOP for your code
+    if (tailLen)
+        memcpy(caveBytes.data() + headLen + userBytes, relocated.data() + headLen, tailLen);
+    if (fallsThrough)
+    {
+        std::vector<uint8_t> back = MakeJump(caveAddr + stolen + userBytes, entry + stolen, x64);
+        memcpy(caveBytes.data() + stolen + userBytes, back.data(), back.size());
+    }
     if (!proc.Write(caveAddr, caveBytes.data(), caveBytes.size()))
     {
         error = "Could not write the code cave.";
@@ -303,6 +354,7 @@ bool DetourManager::InstallTrampoline(const Process& proc, uint64_t entry, size_
     d.cave = caveAddr;
     d.caveSize = caveSize;
     d.caveUserSize = userBytes;
+    d.caveFreeOff = headLen;   // free region starts here (after fall-through code, before any trailing jmp)
     d.stolenLen = stolen;
     d.kind = "trampoline";
     d.location = proc.Symbolize(entry);
@@ -378,6 +430,7 @@ bool DetourManager::ReplaceInstruction(const Process& proc, uint64_t addr, const
     d.cave = caveAddr;
     d.caveSize = caveSize;
     d.caveUserSize = newInsn.size();
+    d.caveFreeOff = 0;   // the replaced instruction sits at the cave start
     d.stolenLen = stolen;
     d.kind = "assemble";
     d.location = proc.Symbolize(addr);
@@ -412,9 +465,12 @@ bool DetourManager::SetCaveImmediate(const Process& proc, uint64_t entry, uint64
     }
     if (!found) { error = "No immediate instruction was stolen into this cave."; return false; }
 
+    // Free region sits after the fall-through stolen bytes (before any trailing jmp/ret).
+    const uint64_t freeStart = d->cave + d->caveFreeOff;
+
     std::vector<uint8_t> insn(d->original.begin() + ao, d->original.begin() + ao + al);
     std::vector<uint8_t> encoded;
-    if (!EncodeImmediateReloc(insn, x64, value, entry + ao, d->cave, encoded, error)) return false;
+    if (!EncodeImmediateReloc(insn, x64, value, entry + ao, freeStart, encoded, error)) return false;
     if (encoded.size() > d->caveUserSize)
     {
         error = "Not enough free bytes (" + std::to_string(encoded.size()) + " needed, " +
@@ -425,11 +481,85 @@ bool DetourManager::SetCaveImmediate(const Process& proc, uint64_t entry, uint64
     // Free region = the widened instruction followed by NOPs.
     std::vector<uint8_t> freeBytes(d->caveUserSize, 0x90);
     memcpy(freeBytes.data(), encoded.data(), encoded.size());
-    if (!proc.Write(d->cave, freeBytes.data(), freeBytes.size())) { error = "Could not write the cave."; return false; }
+    if (!proc.Write(freeStart, freeBytes.data(), freeBytes.size())) { error = "Could not write the cave."; return false; }
 
-    // NOP the stolen copy of that instruction so the value isn't applied twice.
+    // NOP the stolen copy of that instruction (at the start of the cave) so it isn't applied twice.
     std::vector<uint8_t> nops(al, 0x90);
-    proc.Write(d->cave + d->caveUserSize + ao, nops.data(), nops.size());
+    proc.Write(d->cave + ao, nops.data(), nops.size());
+    return true;
+}
+
+bool DetourManager::EditCaveCode(const Process& proc, uint64_t addr, const std::vector<uint8_t>& newInsn,
+                                 std::string& error)
+{
+    if (!proc.IsOpen()) { error = "No process attached"; return false; }
+    if (newInsn.empty()) { error = "Nothing to assemble"; return false; }
+
+    const Detour* d = CaveForAddress(addr);
+    if (!d) { error = "That address isn't inside a cave."; return false; }
+
+    const bool x64 = proc.Is64();
+    // Editable span = the stolen head plus the free bytes; the jump back / trailing jmp after it
+    // has to stay last, so it is pinned and excluded. Growth and shrink are absorbed by the free
+    // NOP slack, wherever the edit is (a stolen instruction can grow into it just like a new one).
+    const uint64_t regionStart = d->cave;
+    const size_t regionSize = d->caveFreeOff + d->caveUserSize;
+    if (addr < regionStart || addr >= regionStart + regionSize)
+    {
+        error = "That's the cave's jump back - it has to stay last. Edit an instruction above it.";
+        return false;
+    }
+
+    // Snapshot the editable span so we can reflow the instructions after the edit point.
+    std::vector<uint8_t> region(regionSize);
+    if (!proc.ReadExact(regionStart, region.data(), region.size()))
+    { error = "Could not read the cave."; return false; }
+
+    const size_t editOff = (size_t)(addr - regionStart);
+
+    // Length of the instruction currently at the edit point (a lone NOP when writing into padding).
+    ZydisDecoder dec;
+    ZydisDecoderInit(&dec, x64 ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
+                     x64 ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
+    ZydisDecodedInstruction oldIns;
+    size_t oldLen = 1;
+    if (ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&dec, nullptr, region.data() + editOff,
+                                                   region.size() - editOff, &oldIns)))
+        oldLen = oldIns.length;
+
+    // Used content ends at the last non-NOP byte; everything past it is free padding.
+    size_t used = region.size();
+    while (used > 0 && region[used - 1] == 0x90) --used;
+
+    // The real instructions after the one being edited (none if we're editing in the padding).
+    const size_t tailStart = editOff + oldLen;
+    std::vector<uint8_t> tail;
+    if (tailStart < used) tail.assign(region.begin() + tailStart, region.begin() + used);
+
+    const size_t newUsed = editOff + newInsn.size() + tail.size();
+    if (newUsed > regionSize)
+    {
+        error = "Not enough free bytes (" + std::to_string(newUsed) + " needed, " +
+                std::to_string(regionSize) + " in the cave). Reinstall the cave with more room.";
+        return false;
+    }
+
+    // The tail moves by (newLen - oldLen); fix its RIP-relative / relative operands for the shift.
+    const size_t newTailStart = editOff + newInsn.size();
+    if (!tail.empty() && newTailStart != tailStart)
+    {
+        if (!RelocateStolen(x64, regionStart + tailStart, regionStart + newTailStart, tail, error))
+            return false;
+    }
+
+    // Rebuild: [bytes before edit][new instruction][shifted tail][NOP padding].
+    std::vector<uint8_t> out(regionSize, 0x90);
+    memcpy(out.data(), region.data(), editOff);
+    memcpy(out.data() + editOff, newInsn.data(), newInsn.size());
+    if (!tail.empty()) memcpy(out.data() + newTailStart, tail.data(), tail.size());
+
+    if (!proc.Write(regionStart, out.data(), out.size()))
+    { error = "Write failed (page protected?)"; return false; }
     return true;
 }
 

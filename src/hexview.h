@@ -50,6 +50,7 @@ private:
     bool m_disasm = false;
     char m_asmInput[128] = "";
     std::string m_asmStatus;
+    bool m_refocusAsm = false; // keep the assembler box focused after an Enter
     int m_nibble = 0;
     bool m_asciiFocus = false;
     bool m_dragging = false;

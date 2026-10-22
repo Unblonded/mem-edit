@@ -109,19 +109,14 @@ void App::Init(void* hwnd, ImFont* uiFont, ImFont* monoFont)
     m_hex.onFindAccess = [this](uint64_t a, int size, TraceKind k) { StartTrace(a, size, k); };
     m_hex.onDecompile = [this](uint64_t a) { StartDecompile(a); };
     m_hex.onAssembleHook = [this](uint64_t a, const std::vector<uint8_t>& bytes, std::string& status) -> bool {
-        // Inside an existing trampoline's cave? Never hook a cave address - write into the free
-        // bytes if it fits there, otherwise tell them to make the cave bigger. Keeps one trampoline.
-        if (const Detour* d = m_detours.CaveForAddress(a))
+        // Inside an existing trampoline's cave? Never hook a cave address. Any instruction in the
+        // cave ([head stolen][free][trailing jmp/jump back]) is editable except the jump back, which
+        // stays last. Editing one reflows the rest: a longer one pushes the following code down into
+        // the free padding, a shorter one pulls it up and re-pads with NOPs.
+        if (m_detours.CaveForAddress(a))
         {
-            uint64_t freeEnd = d->cave + d->caveUserSize;
-            if (a >= freeEnd || a + bytes.size() > freeEnd)
-            {
-                status = "past the cave's free bytes (the original instructions live there) - "
-                         "reinstall the cave with more free bytes for room";
-                return false;
-            }
-            if (!m_proc.Write(a, bytes.data(), bytes.size())) { status = "write failed (page protected?)"; return false; }
-            status = "written into the cave at " + ToHex(d->cave);
+            if (!m_detours.EditCaveCode(m_proc, a, bytes, status)) return false;
+            status = "written into the cave at " + ToHex(a) + " (following code reflowed to fit)";
             return true;
         }
         if (!m_detours.ReplaceInstruction(m_proc, a, bytes, status)) return false;
@@ -2030,9 +2025,10 @@ void App::DrawDetours()
                 RunDecompile();
             }
         }
-        ImGui::SetItemTooltip("Allocates a code cave: [your bytes][stolen instructions][jump back].\n"
-                              "Free bytes defaults to a size for this instruction; raise it if you\n"
-                              "need more room. The original still runs - edit the cave in the Memory View.");
+        ImGui::SetItemTooltip("Allocates a code cave: [original instructions][your free bytes][jump back].\n"
+                              "If the stolen code ends in a jmp/ret, the free bytes go just before it so\n"
+                              "they still run. Your code runs AFTER the original, so a store you write wins.\n"
+                              "Free bytes defaults to a size for this instruction; raise it if you need more.");
         ImGui::EndDisabled();
         if (already) ImGui::TextDisabled("This entry is already detoured - see the list below.");
     }
@@ -2089,7 +2085,9 @@ void App::DrawDetours()
             {
                 if (ImGui::SmallButton("Edit cave"))
                 {
-                    m_hex.FocusEdit(d.cave, d.caveUserSize);
+                    // Land on the first byte of the cave - the original (stolen) instructions -
+                    // so you see the function first, with your free bytes below them.
+                    m_hex.FocusDisasm(d.cave);
                     m_showHex = true;
                     ImGui::SetWindowFocus(kWinHex);
                 }
