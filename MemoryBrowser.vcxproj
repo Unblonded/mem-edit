@@ -83,6 +83,7 @@
     <ClCompile Include="src\scan\scanner.cpp" />
     <ClCompile Include="src\core\values.cpp" />
     <ClCompile Include="src\code\tracer.cpp" />
+    <ClCompile Include="src\code\vehtracer.cpp" />
     <ClCompile Include="src\code\decompiler.cpp" />
     <ClCompile Include="src\code\patches.cpp" />
     <ClCompile Include="src\code\detour.cpp" />
@@ -139,6 +140,8 @@
     <ClInclude Include="src\scan\scanner.h" />
     <ClInclude Include="src\core\values.h" />
     <ClInclude Include="src\code\tracer.h" />
+    <ClInclude Include="src\code\vehtracer.h" />
+    <ClInclude Include="src\code\veh_ipc.h" />
     <ClInclude Include="src\code\decompiler.h" />
     <ClInclude Include="src\code\patches.h" />
     <ClInclude Include="src\code\detour.h" />

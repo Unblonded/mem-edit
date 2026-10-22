@@ -9,6 +9,7 @@
 #include "scan/scanner.h"
 #include "ui/selection.h"
 #include "code/tracer.h"
+#include "code/vehtracer.h"
 #include "core/values.h"
 
 #include <map>
@@ -154,8 +155,12 @@ private:
     std::vector<std::string> m_log;
     bool m_logScroll = false;
 
-    // Access tracing (hardware breakpoints)
+    // Access tracing (hardware breakpoints). Two interchangeable backends: the Windows debugger and
+    // the injected VEH debugger; m_debuggerMode picks which Dbg() returns.
     AccessTracer m_tracer;
+    VehTracer m_veh;
+    int m_debuggerMode = 0; // 0 = Windows debugger, 1 = VEH (injected)
+    ITracer* Dbg() { return m_debuggerMode == 1 ? (ITracer*)&m_veh : (ITracer*)&m_tracer; }
     std::vector<TraceWindow> m_traces;
     std::map<uint64_t, std::vector<uint8_t>> m_patches; // instruction address -> original bytes
 

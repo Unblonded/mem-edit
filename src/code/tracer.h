@@ -34,26 +34,52 @@ struct TraceHit
     TraceRegs regs;
 };
 
-// Finds the instructions that write to / access an address, using the CPU's
-// hardware debug registers (DR0-DR3). Attaches to the target as a debugger
-// while at least one watch is active, and detaches without killing it.
-class AccessTracer
+// Data breakpoints fire *after* the instruction, so given the instruction pointer afterwards (plus
+// the register snapshot and the watched range) this searches backwards for the instruction that
+// made the access and disassembles it. Shared by both tracer backends. `process` is read only.
+// With ipIsStart=false the ip is the address *after* the access (hardware breakpoint) and we search
+// backwards; with ipIsStart=true the ip is the faulting instruction itself (page-guard) and we
+// decode it forwards.
+TraceHit DecodeTraceHit(HANDLE process, bool is64, uint64_t ipAfter, const TraceRegs& regs,
+                        uint64_t watched, int watchedSize, bool ipIsStart = false);
+
+const char* TraceRegName(int i, bool is64);
+
+// A memory-access tracer: both the Windows-debugger and the injected-VEH backend implement this,
+// so the UI can drive either interchangeably.
+class ITracer
 {
 public:
     static constexpr int kSlots = 4;
-
-    ~AccessTracer() { Shutdown(); }
+    virtual ~ITracer() = default;
 
     // Returns a slot id (0-3) or -1 with `error` set.
-    int Add(DWORD pid, bool is64, uint64_t address, int size, TraceKind kind, std::string& error);
-    void Remove(int slot);
-    void Clear(int slot);
-    std::vector<TraceHit> Hits(int slot) const;
-    bool Attached() const { return m_running; }
-    std::string Error() const;
-    void Shutdown();
+    virtual int Add(DWORD pid, bool is64, uint64_t address, int size, TraceKind kind, std::string& error) = 0;
+    virtual void Remove(int slot) = 0;
+    virtual void Clear(int slot) = 0;
+    virtual std::vector<TraceHit> Hits(int slot) const = 0;
+    virtual bool Attached() const = 0;
+    virtual std::string Error() const = 0;
+    virtual void Shutdown() = 0;
+};
 
-    static const char* RegName(int i, bool is64);
+// Finds the instructions that write to / access an address, using the CPU's
+// hardware debug registers (DR0-DR3). Attaches to the target as a debugger
+// while at least one watch is active, and detaches without killing it.
+class AccessTracer : public ITracer
+{
+public:
+    ~AccessTracer() override { Shutdown(); }
+
+    int Add(DWORD pid, bool is64, uint64_t address, int size, TraceKind kind, std::string& error) override;
+    void Remove(int slot) override;
+    void Clear(int slot) override;
+    std::vector<TraceHit> Hits(int slot) const override;
+    bool Attached() const override { return m_running; }
+    std::string Error() const override;
+    void Shutdown() override;
+
+    static const char* RegName(int i, bool is64) { return TraceRegName(i, is64); }
 
 private:
     struct Slot
@@ -70,7 +96,6 @@ private:
     void ApplyAll(bool suspend);
     bool HandleSingleStep(HANDLE thread);
     void Record(int slot, const TraceRegs& regs);
-    TraceHit Decode(uint64_t ipAfter, const TraceRegs& regs, uint64_t watched, int watchedSize) const;
 
     mutable std::mutex m_mutex;
     Slot m_slots[kSlots];

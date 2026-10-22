@@ -14,7 +14,7 @@
 #define STATUS_WX86_BREAKPOINT ((DWORD)0x4000001FL)
 #endif
 
-const char* AccessTracer::RegName(int i, bool is64)
+const char* TraceRegName(int i, bool is64)
 {
     static const char* r64[] = { "RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI",
                                  "R8",  "R9",  "R10", "R11", "R12", "R13", "R14", "R15" };
@@ -156,10 +156,42 @@ void AccessTracer::ApplyAll(bool suspend)
     }
 }
 
-TraceHit AccessTracer::Decode(uint64_t ipAfter, const TraceRegs& regs, uint64_t watched, int watchedSize) const
+TraceHit DecodeTraceHit(HANDLE process, bool is64, uint64_t ipAfter, const TraceRegs& regs,
+                        uint64_t watched, int watchedSize, bool ipIsStart)
 {
     TraceHit hit;
     hit.regs = regs;
+
+    // Page-guard faults point the ip at the faulting instruction itself: decode it directly.
+    if (ipIsStart)
+    {
+        uint8_t ib[16] = {};
+        SIZE_T g = 0;
+        ReadProcessMemory(process, (LPCVOID)ipAfter, ib, sizeof(ib), &g);
+        hit.address = ipAfter;
+        ZydisDecoder d2;
+        if (is64) ZydisDecoderInit(&d2, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+        else ZydisDecoderInit(&d2, ZYDIS_MACHINE_MODE_LEGACY_32, ZYDIS_STACK_WIDTH_32);
+        ZydisDecodedInstruction ins;
+        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+        if (g > 0 && ZYAN_SUCCESS(ZydisDecoderDecodeFull(&d2, ib, g, &ins, ops)))
+        {
+            hit.length = ins.length;
+            hit.bytes.assign(ib, ib + ins.length);
+            ZydisFormatter fmt;
+            ZydisFormatterInit(&fmt, ZYDIS_FORMATTER_STYLE_INTEL);
+            ZydisFormatterSetProperty(&fmt, ZYDIS_FORMATTER_PROP_FORCE_SIZE, ZYAN_TRUE);
+            char text[256];
+            if (ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&fmt, &ins, ops, ins.operand_count_visible, text,
+                                                             sizeof(text), hit.address, nullptr)))
+                hit.text = text;
+            else
+                hit.text = BytesToHex(hit.bytes.data(), hit.bytes.size());
+        }
+        else
+            hit.text = "(could not decode)";
+        return hit;
+    }
 
     // The CPU reports data breakpoints *after* the instruction ran, so search
     // backwards for the instruction that ends exactly at ipAfter.
@@ -167,7 +199,7 @@ TraceHit AccessTracer::Decode(uint64_t ipAfter, const TraceRegs& regs, uint64_t 
     SIZE_T got = 0;
     uint64_t from = ipAfter >= 15 ? ipAfter - 15 : 0;
     size_t span = (size_t)(ipAfter - from);
-    ReadProcessMemory(m_process, (LPCVOID)from, buf, span, &got);
+    ReadProcessMemory(process, (LPCVOID)from, buf, span, &got);
     if (got != span)
     {
         // Partially unreadable (start of a page): only use the readable tail.
@@ -175,7 +207,7 @@ TraceHit AccessTracer::Decode(uint64_t ipAfter, const TraceRegs& regs, uint64_t 
         for (size_t k = 1; k <= span; k++)
         {
             SIZE_T g = 0;
-            if (!ReadProcessMemory(m_process, (LPCVOID)(ipAfter - k), buf + span - k, k, &g) || g != k) break;
+            if (!ReadProcessMemory(process, (LPCVOID)(ipAfter - k), buf + span - k, k, &g) || g != k) break;
             got = k;
         }
         from = ipAfter - got;
@@ -184,7 +216,7 @@ TraceHit AccessTracer::Decode(uint64_t ipAfter, const TraceRegs& regs, uint64_t 
     }
 
     ZydisDecoder dec;
-    if (m_is64) ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+    if (is64) ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
     else ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LEGACY_32, ZYDIS_STACK_WIDTH_32);
 
     ZydisRegisterContext rc{};
@@ -266,7 +298,7 @@ void AccessTracer::Record(int slot, const TraceRegs& regs)
         size = s.size;
     }
     // First time this instruction fires: disassemble outside the lock.
-    TraceHit hit = Decode(regs.ip, regs, watched, size);
+    TraceHit hit = DecodeTraceHit(m_process, m_is64, regs.ip, regs, watched, size);
     hit.count = 1;
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_slots[slot].used) m_slots[slot].hits.emplace(regs.ip, std::move(hit));

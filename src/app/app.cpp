@@ -187,6 +187,7 @@ void App::Detach()
     if (m_scanner.Busy()) return;
     if (m_proc.IsOpen()) Log("Detached from " + m_proc.Name());
     m_tracer.Shutdown();
+    m_veh.Shutdown();
     m_traces.clear();
     m_patches.clear();
     // Undo detours and free their caves while we still have the handle.
@@ -439,6 +440,32 @@ void App::DrawMenuBar()
     if (ImGui::MenuItem("Opcodes")) m_showOpcodes = true;
     if (ImGui::MenuItem("Pointer scan")) m_showPtrScan = true;
     if (ImGui::MenuItem("AOB scan")) m_showAob = true;
+    if (ImGui::BeginMenu("Debugger"))
+    {
+        // The two backends don't share hardware-breakpoint slots, so only switch when nothing is
+        // being traced. Close the trace windows first otherwise.
+        bool canSwitch = m_traces.empty();
+        ImGui::BeginDisabled(!canSwitch);
+        if (ImGui::MenuItem("Windows debugger", nullptr, m_debuggerMode == 0)) m_debuggerMode = 0;
+        if (ImGui::MenuItem("VEH debugger (injected)", nullptr, m_debuggerMode == 1)) m_debuggerMode = 1;
+        if (m_debuggerMode == 1)
+        {
+            ImGui::Separator();
+            ImGui::TextDisabled("VEH watchpoint method:");
+            if (ImGui::MenuItem("  Hardware (DR0-DR3)", nullptr, m_veh.Method() == 0)) m_veh.SetMethod(0);
+            if (ImGui::MenuItem("  Page-guard (no debug registers)", nullptr, m_veh.Method() == 1)) m_veh.SetMethod(1);
+        }
+        ImGui::EndDisabled();
+        if (!canSwitch) ImGui::TextDisabled("Close trace windows to switch");
+        ImGui::Separator();
+        if (m_debuggerMode == 1)
+            ImGui::TextDisabled(m_veh.Method() == 1
+                                    ? "Page-guard: no debug registers - beats DR-scanning anti-debug. 64-bit."
+                                    : "Hardware DR: fast/exact, but visible to DR-scanning anti-debug. 64-bit.");
+        else
+            ImGui::TextDisabled("Windows: DebugActiveProcess + DR0-DR3. Works on 32/64-bit.");
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Help"))
     {
         ImGui::MenuItem("Expressions & shortcuts", nullptr, &m_showAbout);
@@ -1885,7 +1912,7 @@ void App::StartTrace(uint64_t address, int size, TraceKind kind)
         }
     }
     std::string err;
-    int slot = m_tracer.Add(m_proc.Pid(), m_proc.Is64(), address, size, kind, err);
+    int slot = Dbg()->Add(m_proc.Pid(), m_proc.Is64(), address, size, kind, err);
     if (slot < 0)
     {
         Log("Trace: " + err);
@@ -1916,15 +1943,16 @@ void App::DrawTraceWindows()
             continue;
         }
 
-        std::vector<TraceHit> hits = m_tracer.Hits(t.slot);
-        std::string err = m_tracer.Error();
+        std::vector<TraceHit> hits = Dbg()->Hits(t.slot);
+        std::string err = Dbg()->Error();
+        const char* dbgName = m_debuggerMode == 1 ? "VEH debugger (injected)" : "Windows debugger";
         if (!err.empty()) ImGui::TextColored(kColErr, "%s", err.c_str());
-        else if (m_tracer.Attached())
-            ImGui::TextColored(kColOk, "Debugger attached - watching %d byte(s) at %s (DR%d)", t.size,
+        else if (Dbg()->Attached())
+            ImGui::TextColored(kColOk, "%s - watching %d byte(s) at %s (DR%d)", dbgName, t.size,
                                AddrText(t.address).c_str(), t.slot);
         else ImGui::TextDisabled("Starting debugger...");
 
-        if (ImGui::Button("Clear")) m_tracer.Clear(t.slot);
+        if (ImGui::Button("Clear")) Dbg()->Clear(t.slot);
         ImGui::SameLine();
         if (ImGui::Button("Stop")) t.open = false;
         ImGui::SameLine();
@@ -2066,7 +2094,7 @@ void App::DrawTraceWindows()
     {
         if (!it->open)
         {
-            m_tracer.Remove(it->slot);
+            Dbg()->Remove(it->slot);
             Log("Stopped watching " + it->label);
             it = m_traces.erase(it);
         }
