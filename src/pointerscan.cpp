@@ -61,6 +61,25 @@ struct Entry
     uint64_t l = 0; // where it is stored
 };
 
+// A concurrent "have we queued this address?" set, sharded so parallel search threads rarely
+// contend. Each hop address is processed once; whichever thread claims it first keeps it.
+struct VisitedSet
+{
+    static constexpr int kShards = 64; // power of two
+    std::unordered_set<uint64_t> sets[kShards];
+    std::mutex locks[kShards];
+    std::atomic<size_t> count{ 0 };
+
+    bool insert(uint64_t a)
+    {
+        int s = (int)((a >> 4) & (kShards - 1));
+        std::lock_guard<std::mutex> lk(locks[s]);
+        if (sets[s].insert(a).second) { count.fetch_add(1, std::memory_order_relaxed); return true; }
+        return false;
+    }
+    size_t size() const { return count.load(std::memory_order_relaxed); }
+};
+
 constexpr size_t kChunk = 8 * 1024 * 1024;
 } // namespace
 
@@ -261,7 +280,7 @@ void PointerScanner::Run(const Process* proc, PointerScanOptions o)
     struct Node { uint64_t addr; std::vector<int64_t> offs; };
     std::vector<Node> frontier;
     frontier.push_back({ o.target, {} });
-    std::unordered_set<uint64_t> visited;
+    VisitedSet visited;
     visited.insert(o.target);
 
     auto out = std::make_unique<std::vector<PointerChain>>();
@@ -269,15 +288,20 @@ void PointerScanner::Run(const Process* proc, PointerScanOptions o)
     const uint64_t loSpan = o.maxOffset;
     const uint64_t hiSpan = o.allowNegative ? o.maxOffset : 0;
     const size_t kVisitedCap = 4000000;
-    bool stop = false;
+    std::atomic<size_t> emitted{ 0 };
 
-    for (int depth = 0; depth < o.maxDepth && !frontier.empty() && !stop; depth++)
+    for (int depth = 0; depth < o.maxDepth && !frontier.empty() && !m_cancel; depth++)
     {
-        std::vector<Node> nextFrontier;
-        for (const Node& node : frontier)
-        {
-            if (m_cancel) { stop = true; break; }
-            if (out->size() >= o.maxResults) { stop = true; break; }
+        // Process every frontier node in parallel. Each node only reads the shared sorted map and
+        // the live process (both safe), claims hop addresses through the sharded visited set, and
+        // writes its finds to its own slot - so the threads never touch the same memory.
+        std::vector<std::vector<PointerChain>> nodeHits(frontier.size());
+        std::vector<std::vector<Node>> nodeNext(frontier.size());
+        const bool lastHop = depth + 1 >= o.maxDepth;
+
+        ParallelFor(frontier.size(), [&](size_t ni) {
+            if (m_cancel || emitted.load(std::memory_order_relaxed) >= o.maxResults) return;
+            const Node& node = frontier[ni];
 
             // Pointers whose value V satisfies V + off == node.addr for off in [-hiSpan, loSpan].
             uint64_t lo = node.addr > loSpan ? node.addr - loSpan : 0;
@@ -288,6 +312,7 @@ void PointerScanner::Run(const Process* proc, PointerScanOptions o)
                                          [](uint64_t val, const Entry& e) { return val < e.v; });
             for (auto it = itLo; it != itHi; ++it)
             {
+                if (m_cancel) return;
                 int64_t off = (int64_t)(node.addr - it->v); // forward add at this hop
                 uint64_t l = it->l;
 
@@ -309,16 +334,12 @@ void PointerScanner::Run(const Process* proc, PointerScanOptions o)
                     uint64_t resolved = 0;
                     if (ResolveChain(*proc, ch.base, ch.offsets, resolved) && resolved == o.target)
                     {
-                        std::string key = ch.Expression();
-                        if (seen.insert(key).second)
-                        {
-                            ch.resolved = resolved;
-                            out->push_back(std::move(ch));
-                            if (out->size() >= o.maxResults) { stop = true; break; }
-                        }
+                        ch.resolved = resolved;
+                        nodeHits[ni].push_back(std::move(ch));
+                        emitted.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
-                else if (!o.staticOnly && depth + 1 == o.maxDepth)
+                else if (!o.staticOnly && lastHop)
                 {
                     // Deepest level and non-static allowed: keep a dynamic base as a last resort.
                     PointerChain ch;
@@ -327,17 +348,33 @@ void PointerScanner::Run(const Process* proc, PointerScanOptions o)
                     uint64_t resolved = 0;
                     if (ResolveChain(*proc, ch.base, ch.offsets, resolved) && resolved == o.target)
                     {
-                        std::string key = ch.Expression();
-                        if (seen.insert(key).second) { ch.resolved = resolved; out->push_back(std::move(ch)); }
+                        ch.resolved = resolved;
+                        nodeHits[ni].push_back(std::move(ch));
+                        emitted.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
 
                 // Walk further up unless this location is already queued or we've gone too wide.
-                if (depth + 1 < o.maxDepth && visited.size() < kVisitedCap && visited.insert(l).second)
-                    nextFrontier.push_back({ l, std::move(newOffs) });
+                if (!lastHop && visited.size() < kVisitedCap && visited.insert(l))
+                    nodeNext[ni].push_back({ l, std::move(newOffs) });
             }
-            if (stop) break;
+        });
+
+        if (m_cancel) break;
+
+        // Merge finds in node order (deterministic) with a final dedup / result cap.
+        std::vector<Node> nextFrontier;
+        bool full = false;
+        for (size_t ni = 0; ni < frontier.size() && !full; ni++)
+        {
+            for (auto& ch : nodeHits[ni])
+            {
+                if (out->size() >= o.maxResults) { full = true; break; }
+                if (seen.insert(ch.Expression()).second) out->push_back(std::move(ch));
+            }
+            for (auto& nx : nodeNext[ni]) nextFrontier.push_back(std::move(nx));
         }
+        if (full) break;
         frontier = std::move(nextFrontier);
     }
 

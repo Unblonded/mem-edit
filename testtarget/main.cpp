@@ -31,6 +31,95 @@ static_assert(offsetof(Player, speed) == 0x20 && offsetof(Player, ammo) == 0x24 
               offsetof(Player, title) == 0x38 && offsetof(Player, secret) == 0x68, "offsets shown in the comments");
 static Player* volatile g_player = nullptr;
 
+// A deep pointer chain for practising the pointer scanner. Only g_world is static (green); every
+// object below it lives on the heap, so the only stable way to reach a value is the offset chain:
+//   hero HP   : [[TestTarget.exe+g_world]+8]+18
+//   hero gold : [[[TestTarget.exe+g_world]+8]+20]+0
+//   weapon ammo (depth 4): [[[[TestTarget.exe+g_world]+8]+20]+8]+0
+struct Weapon
+{
+    int32_t ammo;        // +0x00
+    int32_t damage;      // +0x04
+    float   reload;      // +0x08
+    uint8_t tag[4];      // +0x0C  marker DE C0 AD 0B
+};
+struct Inventory
+{
+    int32_t gold;        // +0x00
+    int32_t potions;     // +0x04
+    Weapon* weapon;      // +0x08  -> Weapon
+};
+struct Actor
+{
+    char       name[24]; // +0x00
+    int32_t    hp;       // +0x18
+    int32_t    maxHp;    // +0x1C
+    Inventory* inv;      // +0x20  -> Inventory
+};
+struct World
+{
+    uint32_t tick;       // +0x00
+    uint32_t pad;        // +0x04
+    Actor*   hero;       // +0x08  -> Actor
+    Actor*   enemy;      // +0x10  -> Actor
+};
+static_assert(offsetof(Inventory, weapon) == 0x08 && offsetof(Actor, hp) == 0x18 &&
+              offsetof(Actor, inv) == 0x20 && offsetof(World, hero) == 0x08,
+              "pointer-chain offsets shown in the comments");
+static World* volatile g_world = nullptr;
+static int g_rebuilds = 0;
+
+// Allocate the whole World -> Actor -> Inventory -> Weapon graph fresh on the heap, scattering a
+// padding block between each so the objects land at new, unrelated addresses every time.
+static Actor* NewActor(const char* name, int32_t hp, int32_t gold, int32_t ammo)
+{
+    static void* pad[128];
+    static int pi = 0;
+    auto scatter = [&]() { pad[pi++ % 128] = malloc(2048 + (pi * 613) % 6000); };
+
+    scatter();
+    Weapon* w = (Weapon*)calloc(1, sizeof(Weapon));
+    w->ammo = ammo; w->damage = 12; w->reload = 1.25f;
+    const uint8_t tag[4] = { 0xDE, 0xC0, 0xAD, 0x0B };
+    memcpy(w->tag, tag, 4);
+
+    scatter();
+    Inventory* inv = (Inventory*)calloc(1, sizeof(Inventory));
+    inv->gold = gold; inv->potions = 3; inv->weapon = w;
+
+    scatter();
+    Actor* a = (Actor*)calloc(1, sizeof(Actor));
+    strcpy_s(a->name, name);
+    a->hp = hp; a->maxHp = hp; a->inv = inv;
+    return a;
+}
+
+static void FreeActor(Actor* a)
+{
+    if (!a) return;
+    if (a->inv) { free(a->inv->weapon); free(a->inv); }
+    free(a);
+}
+
+static World* BuildWorld()
+{
+    static void* pad[64];
+    static int pi = 0;
+    pad[pi++ % 64] = malloc(4096);
+    World* w = (World*)calloc(1, sizeof(World));
+    w->hero = NewActor("Hero", 100, 250, 30);
+    w->enemy = NewActor("Goblin", 40, 15, 6);
+    return w;
+}
+
+static void FreeWorld(World* w)
+{
+    if (!w) return;
+    FreeActor(w->hero);
+    FreeActor(w->enemy);
+    free(w);
+}
+
 static bool g_poison = false;
 static bool g_showAddresses = false;
 static int g_moves = 0;
@@ -79,9 +168,17 @@ static void Draw(double t)
     printf("  Ammo    : %-6d                                                 \n", p->ammo);
     printf("  Pos     : %10.4f, %10.4f (Double, always moving)            \n", p->posX, p->posY);
     printf("                                                                     \n");
+    World* w = g_world;
+    Actor* hero = w->hero;
+    Weapon* wep = hero->inv->weapon;
+    printf("  --- Pointer-chain practice (only g_world is static) ----------------\n");
+    printf("  Hero HP : %-6d  gold %-8d  weapon ammo %-6d (rebuilt %d times)   \n",
+           hero->hp, hero->inv->gold, wep->ammo, g_rebuilds);
+    printf("                                                                     \n");
     printf("  Keys:  [D] take 7 damage   [H] heal 10     [G] +25 gold   [S] spend 40 gold\n");
     printf("         [L] level up        [F] fire ammo   [R] reload     [+/-] speed\n");
     printf("         [P] toggle poison   [M] move player object in memory\n");
+    printf("         [N] rebuild world (moves the whole pointer chain)\n");
     printf("         [A] show/hide addresses (answers)   [Q] quit\n");
     printf("                                                                     \n");
 
@@ -96,6 +193,10 @@ static void Draw(double t)
         printf("    Ammo     [TestTarget.exe+%llX]+24  (pointer chain)          \n", (unsigned long long)ptrOff);
         printf("    Speed    [TestTarget.exe+%llX]+20                           \n", (unsigned long long)ptrOff);
         printf("    Secret   AOB  DE AD BE EF ?? 37 C0 DE                       \n");
+        uint64_t wOff = (uint64_t)&g_world - base;
+        printf("    Hero HP  [[TestTarget.exe+%llX]+8]+18   (%p)       \n", (unsigned long long)wOff, (void*)&hero->hp);
+        printf("    Gold     [[[TestTarget.exe+%llX]+8]+20]+0          \n", (unsigned long long)wOff);
+        printf("    W.ammo   [[[[TestTarget.exe+%llX]+8]+20]+8]+0  (%p)\n", (unsigned long long)wOff, (void*)&wep->ammo);
     }
     else
     {
@@ -114,6 +215,7 @@ int main()
     system("cls");
 
     g_player = NewPlayer(nullptr);
+    g_world = BuildWorld();
     ULONGLONG start = GetTickCount64(), lastPoison = start;
 
     for (;;)
@@ -124,10 +226,12 @@ int main()
         p->posX = std::cos(t * 0.7) * 100.0 * p->speed;
         p->posY = std::sin(t * 0.7) * 100.0 * p->speed;
         g_score = g_score + 1;
+        g_world->tick++;
 
         if (g_poison && now - lastPoison >= 1000)
         {
             g_health = g_health - 1;
+            g_world->hero->hp = g_world->hero->hp - 1;
             lastPoison = now;
         }
         if (!g_poison) lastPoison = now;
@@ -138,13 +242,13 @@ int main()
             if (c == 0 || c == 0xE0) { _getch(); continue; }
             switch (toupper(c))
             {
-            case 'D': g_health = g_health - 7; break;
-            case 'H': g_health = g_health + 10; break;
-            case 'G': g_gold = g_gold + 25; break;
-            case 'S': g_gold = g_gold - 40; break;
+            case 'D': g_health = g_health - 7; g_world->hero->hp -= 7; break;
+            case 'H': g_health = g_health + 10; g_world->hero->hp += 10; break;
+            case 'G': g_gold = g_gold + 25; g_world->hero->inv->gold += 25; break;
+            case 'S': g_gold = g_gold - 40; g_world->hero->inv->gold -= 40; break;
             case 'L': g_level = (uint8_t)(g_level + 1); break;
-            case 'F': if (p->ammo > 0) p->ammo--; break;
-            case 'R': p->ammo = 30; break;
+            case 'F': if (p->ammo > 0) p->ammo--; if (g_world->hero->inv->weapon->ammo > 0) g_world->hero->inv->weapon->ammo--; break;
+            case 'R': p->ammo = 30; g_world->hero->inv->weapon->ammo = 30; break;
             case '+': case '=': p->speed += 0.25f; break;
             case '-': case '_': p->speed -= 0.25f; break;
             case 'P': g_poison = !g_poison; break;
@@ -159,7 +263,22 @@ int main()
                 g_moves++;
                 break;
             }
+            case 'N':
+            {
+                // Rebuild the whole chain elsewhere, preserving the values. Static paths through
+                // g_world keep working; any raw heap addresses you saved now point at freed memory.
+                World* old = g_world;
+                World* fresh = BuildWorld();
+                fresh->hero->hp = old->hero->hp;
+                fresh->hero->inv->gold = old->hero->inv->gold;
+                fresh->hero->inv->weapon->ammo = old->hero->inv->weapon->ammo;
+                g_world = fresh;
+                FreeWorld(old);
+                g_rebuilds++;
+                break;
+            }
             case 'Q':
+                FreeWorld(g_world);
                 return 0;
             }
         }
