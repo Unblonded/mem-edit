@@ -2606,31 +2606,10 @@ std::string App::CppTemplateFor(uint64_t entry) const
     std::string sym = m_proc.Symbolize(entry);
     std::string err;
 
-    // Raw disassembly of the original function.
-    std::string ref = "// ==== Original function at " + sym + " ====\n";
-    std::vector<InstructionRow> rows;
-    std::string derr;
-    if (entry && DisassembleFunction(m_proc, entry, rows, derr))
-    {
-        ref += "// -- disassembly --\n";
-        const size_t cap = 400; // keep very large functions from flooding the editor
-        for (size_t i = 0; i < rows.size() && i < cap; i++)
-        {
-            char off[24];
-            snprintf(off, sizeof(off), "+%llX", (unsigned long long)(rows[i].address - entry));
-            ref += "//   " + std::string(off) + "\t" + rows[i].text + "\n";
-        }
-        if (rows.size() > cap) ref += "//   ... (" + std::to_string(rows.size() - cap) + " more instructions)\n";
-    }
-    else
-    {
-        ref += "//   (could not disassemble: " + (derr.empty() ? std::string("unknown") : derr) + ")\n";
-    }
-
-    // Decompiled pseudo-C, for the shape of the logic.
+    // Decompiled pseudo-C of the original, as a reference above the hook body.
     std::string decomp;
     bool ok = entry && DecompileFunction(m_proc, entry, decomp, err);
-    ref += "// -- decompiled (pseudo-C) --\n";
+    std::string ref = "// ---- Original function at " + sym + " (decompiled, for reference) ----\n";
     if (ok)
     {
         size_t start = 0;
@@ -2648,7 +2627,7 @@ std::string App::CppTemplateFor(uint64_t entry) const
     {
         ref += "//   (could not decompile: " + (err.empty() ? std::string("unknown") : err) + ")\n";
     }
-    ref += "// ==================================================================\n\n";
+    ref += "// ------------------------------------------------------------------\n\n";
 
     return "#include \"memhook.h\"\n"
            "using namespace memhook;\n\n" +

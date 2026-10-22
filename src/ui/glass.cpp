@@ -416,6 +416,20 @@ bool CodeEditor(const char* id, std::string& text, const ImVec2& size, int lang,
                         ImGui::GetColorU32(ImGuiCol_Text));
     }
 
+    // The content-sized InputTextMultiline has no scroll of its own and swallows the wheel, so drive
+    // this child's scroll ourselves when the pointer is over the editor.
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows))
+    {
+        float wheelY = ImGui::GetIO().MouseWheel;
+        float wheelX = ImGui::GetIO().MouseWheelH;
+        if (wheelY != 0.0f && ImGui::GetScrollMaxY() > 0.0f)
+            ImGui::SetScrollY(ImClamp(ImGui::GetScrollY() - wheelY * ImGui::GetTextLineHeight() * 3.0f,
+                                      0.0f, ImGui::GetScrollMaxY()));
+        if (wheelX != 0.0f && ImGui::GetScrollMaxX() > 0.0f)
+            ImGui::SetScrollX(ImClamp(ImGui::GetScrollX() - wheelX * ImGui::GetTextLineHeight() * 3.0f,
+                                      0.0f, ImGui::GetScrollMaxX()));
+    }
+
     if (mono) ImGui::PopFont();
     ImGui::EndChild();
     ImGui::PopStyleVar();
