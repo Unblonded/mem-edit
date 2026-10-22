@@ -10,16 +10,41 @@ using namespace cpphookipc;
 
 namespace
 {
-std::string RunCapture(const std::string& command)
+// Runs an exe with its output captured, no console window. `env` is a VAR=VAL\0...\0 block (or empty
+// to inherit), `cwd` the working directory (or empty). Returns the combined stdout+stderr.
+int RunExe(const std::string& exe, const std::string& args, const std::string& cwd,
+           const std::string& env, std::string& out)
 {
-    std::string out;
-    FILE* p = _popen(command.c_str(), "r");
-    if (!p) return "Could not start the compiler process.";
+    out.clear();
+    SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) { out = "CreatePipe failed."; return -1; }
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+    std::string cmd = "\"" + exe + "\" " + args;
+    PROCESS_INFORMATION pi{};
+    BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                             env.empty() ? nullptr : (LPVOID)env.data(),
+                             cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+    CloseHandle(wr);
+    if (!ok) { CloseHandle(rd); out = "CreateProcess failed (" + std::to_string(GetLastError()) + ")."; return -1; }
+
     char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), p)) > 0) out.append(buf, n);
-    _pclose(p);
-    return out;
+    DWORD n;
+    while (ReadFile(rd, buf, sizeof(buf), &n, nullptr) && n) out.append(buf, n);
+    CloseHandle(rd);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    return (int)code;
 }
 
 std::string EnvVar(const char* name)
@@ -48,10 +73,10 @@ bool CppHook::FindCompiler(std::string& vcvars) const
     std::string vswhere = pf + "\\Microsoft Visual Studio\\Installer\\vswhere.exe";
     if (GetFileAttributesA(vswhere.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
 
-    std::string cmd = "\"\"" + vswhere + "\" -latest -prerelease -products * "
-                      "-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 "
-                      "-property installationPath\" 2>nul";
-    std::string install = RunCapture(cmd);
+    std::string install;
+    RunExe(vswhere, "-latest -prerelease -products * "
+                    "-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 "
+                    "-property installationPath", "", "", install);
     while (!install.empty() && (install.back() == '\r' || install.back() == '\n' || install.back() == ' '))
         install.pop_back();
     if (install.empty()) return false;
@@ -120,10 +145,61 @@ void CppHook::Detach()
     m_pid = 0;
 }
 
+bool CppHook::EnsureEnv(std::string& error) const
+{
+    if (!m_envBlock.empty() && !m_clPath.empty()) return true;
+
+    std::string vcvars;
+    if (!FindCompiler(vcvars)) { error = "No Visual C++ compiler (cl.exe) was found."; return false; }
+
+    // Run vcvars once and capture the resulting environment, so later builds skip it entirely.
+    char comspec[MAX_PATH]; if (!GetEnvironmentVariableA("ComSpec", comspec, MAX_PATH)) strcpy_s(comspec, "cmd.exe");
+    std::string out;
+    RunExe(comspec, "/c \"\"" + vcvars + "\" >nul 2>&1 && set\"", "", "", out);
+
+    std::string block;
+    std::string path;
+    size_t start = 0;
+    while (start < out.size())
+    {
+        size_t nl = out.find('\n', start);
+        std::string line = out.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (line.find('=') != std::string::npos)
+        {
+            block.append(line);
+            block.push_back('\0');
+            if (_strnicmp(line.c_str(), "PATH=", 5) == 0) path = line.substr(5);
+        }
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+    }
+    block.push_back('\0'); // terminating double-null
+    if (path.empty()) { error = "vcvars did not produce a PATH (is the C++ workload installed?)."; return false; }
+
+    // Find cl.exe on the toolchain PATH.
+    size_t p = 0;
+    while (p < path.size())
+    {
+        size_t semi = path.find(';', p);
+        std::string dir = path.substr(p, semi == std::string::npos ? std::string::npos : semi - p);
+        if (!dir.empty())
+        {
+            std::string cand = dir + (dir.back() == '\\' ? "" : "\\") + "cl.exe";
+            if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) { m_clPath = cand; break; }
+        }
+        if (semi == std::string::npos) break;
+        p = semi + 1;
+    }
+    if (m_clPath.empty()) { error = "cl.exe was not found on the toolchain PATH."; return false; }
+
+    m_envBlock.swap(block);
+    return true;
+}
+
 bool CppHook::Compile(const std::string& source, std::string& dllPath, std::string& log)
 {
-    std::string vcvars;
-    if (!FindCompiler(vcvars)) { log = "No Visual C++ compiler (cl.exe) was found."; return false; }
+    if (!EnsureEnv(log)) return false;
 
     // Fresh headers + source for this build, so the build folder always matches the running tool.
     WriteFile(m_buildDir + "\\cpphook_ipc.h", cpphookembed::kCppHookIpcH);
@@ -134,16 +210,13 @@ bool CppHook::Compile(const std::string& source, std::string& dllPath, std::stri
     std::string dll = "user_" + std::to_string(n) + ".dll";
     if (!WriteFile(m_buildDir + "\\" + cpp, source)) { log = "Could not write the source file."; return false; }
 
-    std::string bat = m_buildDir + "\\build.bat";
-    std::string batText =
-        "@echo off\r\n"
-        "call \"" + vcvars + "\" >nul 2>&1\r\n"
-        "cd /d \"" + m_buildDir + "\"\r\n"
-        "cl /nologo /LD /std:c++17 /EHsc /O2 /Zc:__cplusplus /I. \"" + cpp + "\" "
-        "/Fe:\"" + dll + "\" /Fo:\"user_" + std::to_string(n) + ".obj\" /link /INCREMENTAL:NO\r\n";
-    if (!WriteFile(bat, batText)) { log = "Could not write the build script."; return false; }
+    // Call cl.exe directly with the cached toolchain environment: no cmd, no window, no vcvars re-run.
+    // Unoptimised (/Od) because these are tiny hook files and build speed matters more than codegen.
+    std::string args = "/nologo /LD /std:c++17 /EHsc /Od /MD /I. \"" + cpp + "\" "
+                       "/Fe:\"" + dll + "\" /Fo:\"user_" + std::to_string(n) + ".obj\" "
+                       "/link /INCREMENTAL:NO";
+    RunExe(m_clPath, args, m_buildDir, m_envBlock, log);
 
-    log = RunCapture("\"\"" + bat + "\"\" 2>&1");
     dllPath = m_buildDir + "\\" + dll;
     if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES)
     {

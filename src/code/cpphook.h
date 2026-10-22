@@ -41,6 +41,7 @@ private:
     bool Compile(const std::string& source, std::string& dllPath, std::string& log);
     bool Inject(const std::string& dll, std::string& error);
     bool FindCompiler(std::string& vcvars) const;
+    bool EnsureEnv(std::string& error) const; // cache the toolchain env + cl.exe path (once)
 
     DWORD m_pid = 0;
     HANDLE m_process = nullptr;
@@ -49,4 +50,6 @@ private:
     std::string m_buildDir;
     int m_build = 0;
     mutable std::string m_vcvarsCache;
+    mutable std::string m_envBlock; // VAR=VAL\0...\0 from vcvars, reused for every build
+    mutable std::string m_clPath;   // full path to cl.exe
 };

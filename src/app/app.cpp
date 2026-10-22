@@ -2742,6 +2742,21 @@ void App::DrawCppHooks()
         ImGui::InputTextMultiline("##cppsrc", &m_cppSource, ImVec2(w, h), ImGuiInputTextFlags_AllowTabInput);
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(2);
+
+        // The transparent text hides ImGui's own caret, so draw one where the cursor is.
+        if (ImGuiInputTextState* st = ImGui::GetInputTextState(ImGui::GetItemID()))
+        {
+            int cur = st->GetCursorPos();
+            if (cur < 0) cur = 0;
+            if (cur > (int)m_cppSource.size()) cur = (int)m_cppSource.size();
+            int row = 0, lineStart = 0;
+            for (int i = 0; i < cur; i++) if (m_cppSource[i] == '\n') { row++; lineStart = i + 1; }
+            float cx = origin.x + ImGui::CalcTextSize(m_cppSource.c_str() + lineStart, m_cppSource.c_str() + cur).x;
+            float cy = origin.y + row * ImGui::GetTextLineHeight();
+            if (fmodf((float)ImGui::GetTime(), 1.0f) < 0.6f)
+                ImGui::GetWindowDrawList()->AddLine(ImVec2(cx, cy), ImVec2(cx, cy + ImGui::GetTextLineHeight()),
+                                                    ImGui::GetColorU32(ImGuiCol_Text));
+        }
         ImGui::EndChild();
     }
     else
