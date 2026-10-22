@@ -2746,47 +2746,17 @@ void App::DrawCppHooks()
     float footer = ImGui::GetFrameHeightWithSpacing() * 2 + 150;
     float editH = ImGui::GetContentRegionAvail().y - footer;
     if (editH < 80) editH = 80;
-    if (m_mono) ImGui::PushFont(m_mono);
     if (m_cppHighlight && m_mono)
     {
-        // Colour the code by drawing it under a transparent, content-sized InputTextMultiline. Both
-        // live in one scrolling child, so they move together; editing happens in the (invisible) input.
-        ImGui::BeginChild("##cppeditor", ImVec2(-FLT_MIN, editH), true, ImGuiWindowFlags_HorizontalScrollbar);
-        ImVec2 origin = ImGui::GetCursorScreenPos();
-        ImVec2 content = Syntax::DrawCppCode(ImGui::GetWindowDrawList(), origin, m_cppSource.c_str());
-        float w = content.x + 40 > ImGui::GetContentRegionAvail().x ? content.x + 40 : ImGui::GetContentRegionAvail().x;
-        float h = content.y > ImGui::GetContentRegionAvail().y ? content.y : ImGui::GetContentRegionAvail().y;
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));          // typed glyphs invisible
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-        ImGui::SetCursorScreenPos(origin);
-        ImGui::InputTextMultiline("##cppsrc", &m_cppSource, ImVec2(w, h), ImGuiInputTextFlags_AllowTabInput);
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(2);
-
-        // The transparent text hides ImGui's own caret, so draw one where the cursor is.
-        if (ImGuiInputTextState* st = ImGui::GetInputTextState(ImGui::GetItemID()))
-        {
-            int cur = st->GetCursorPos();
-            if (cur < 0) cur = 0;
-            if (cur > (int)m_cppSource.size()) cur = (int)m_cppSource.size();
-            int row = 0, lineStart = 0;
-            for (int i = 0; i < cur; i++) if (m_cppSource[i] == '\n') { row++; lineStart = i + 1; }
-            float cx = origin.x + ImGui::CalcTextSize(m_cppSource.c_str() + lineStart, m_cppSource.c_str() + cur).x;
-            float cy = origin.y + row * ImGui::GetTextLineHeight();
-            if (fmodf((float)ImGui::GetTime(), 1.0f) < 0.6f)
-                ImGui::GetWindowDrawList()->AddLine(ImVec2(cx, cy), ImVec2(cx, cy + ImGui::GetTextLineHeight()),
-                                                    ImGui::GetColorU32(ImGuiCol_Text));
-        }
-        ImGui::EndChild();
+        Glass::CodeEditor("##cppeditor", m_cppSource, ImVec2(-FLT_MIN, editH), 0, m_mono);
     }
     else
     {
+        if (m_mono) ImGui::PushFont(m_mono);
         ImGui::InputTextMultiline("##cppsrc", &m_cppSource, ImVec2(-FLT_MIN, editH),
                                   ImGuiInputTextFlags_AllowTabInput);
+        if (m_mono) ImGui::PopFont();
     }
-    if (m_mono) ImGui::PopFont();
 
     // --- Actions ---
     if (Glass::AccentButton(ICON_REFRESH "  Compile & Apply"))

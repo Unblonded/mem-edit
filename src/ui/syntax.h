@@ -41,6 +41,10 @@ void Expression(const char* text);
 // so push a monospace font first. Returns the drawn content size (width, height) from `origin`.
 ImVec2 DrawCppCode(ImDrawList* dl, ImVec2 origin, const char* text, float alpha = 1.f);
 
+// Draws multi-line Intel assembly (one instruction per line) into a draw list, each line coloured
+// by Instruction(). Returns the content size (width, height) from `origin`.
+ImVec2 DrawAsmCode(ImDrawList* dl, ImVec2 origin, const char* text, float alpha = 1.f);
+
 // Value types: integers sky, floats teal, strings amber, byte arrays orchid.
 ImVec4 TypeColor(ValueType t);
 

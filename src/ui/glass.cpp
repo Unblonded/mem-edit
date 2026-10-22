@@ -1,6 +1,8 @@
 #include "ui/glass.h"
 
+#include "ui/syntax.h"
 #include "imgui_internal.h"
+#include "misc/cpp/imgui_stdlib.h"
 
 #include <cmath>
 #include <cstring>
@@ -369,5 +371,54 @@ int HitTestCaption(float x, float y)
     for (const ImVec4& r : c.solid)
         if (x >= r.x && x < r.z && y >= r.y && y < r.w) return 0;
     return 1;
+}
+
+bool CodeEditor(const char* id, std::string& text, const ImVec2& size, int lang, ImFont* mono)
+{
+    bool changed = false;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 4));
+    ImGui::BeginChild(id, size, ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+    if (mono) ImGui::PushFont(mono);
+
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 content = (lang == 1) ? Syntax::DrawAsmCode(dl, origin, text.c_str())
+                                 : Syntax::DrawCppCode(dl, origin, text.c_str());
+
+    float availX = ImGui::GetContentRegionAvail().x;
+    float availY = ImGui::GetContentRegionAvail().y;
+    float w = ImMax(content.x + 24.0f, availX);
+    float h = ImMax(content.y, availY);
+
+    // Transparent text box over the coloured text: editing happens here, the glyphs are invisible.
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    ImGui::SetCursorScreenPos(origin);
+    if (ImGui::InputTextMultiline("##edit", &text, ImVec2(w, h), ImGuiInputTextFlags_AllowTabInput))
+        changed = true;
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+
+    // Draw our own caret where the cursor is (the transparent text hides ImGui's).
+    if (ImGuiInputTextState* st = ImGui::GetInputTextState(ImGui::GetItemID()))
+    {
+        int cur = st->GetCursorPos();
+        if (cur < 0) cur = 0;
+        if (cur > (int)text.size()) cur = (int)text.size();
+        int row = 0, lineStart = 0;
+        for (int i = 0; i < cur; i++) if (text[i] == '\n') { row++; lineStart = i + 1; }
+        float cx = origin.x + ImGui::CalcTextSize(text.c_str() + lineStart, text.c_str() + cur).x;
+        float cy = origin.y + row * ImGui::GetTextLineHeight();
+        if (fmodf((float)ImGui::GetTime(), 1.0f) < 0.6f)
+            dl->AddLine(ImVec2(cx, cy), ImVec2(cx, cy + ImGui::GetTextLineHeight()),
+                        ImGui::GetColorU32(ImGuiCol_Text));
+    }
+
+    if (mono) ImGui::PopFont();
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    return changed;
 }
 } // namespace Glass

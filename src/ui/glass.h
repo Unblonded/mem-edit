@@ -1,6 +1,8 @@
 #pragma once
 #include "imgui.h"
 
+#include <string>
+
 // "Liquid glass" look: a slowly drifting colour field behind the interface, and
 // specular rims plus a soft top sheen on every panel so translucent windows read
 // as panes of glass over it.
@@ -51,6 +53,11 @@ bool AccentButton(const char* label, const ImVec2& size = ImVec2(0, 0));
 // Centred placeholder for a panel with nothing to show: icon badge, title, hint and an
 // optional call-to-action button. Fills the remaining content region; returns true when clicked.
 bool EmptyState(const char* icon, const char* title, const char* hint, const char* action = nullptr);
+
+// A scrolling, syntax-highlighted code editor. Draws coloured text under a transparent text box
+// (so the colouring tracks what you type) and draws its own caret. lang 0 = C++, 1 = Intel asm.
+// Pass the monospace font. Returns true the frame the text changed.
+bool CodeEditor(const char* id, std::string& text, const ImVec2& size, int lang, ImFont* mono);
 
 // The custom title bar (the main menu bar doubles as the window caption). The UI writes this
 // each frame, in screen pixels; the window procedure reads it to answer WM_NCHITTEST.

@@ -750,6 +750,56 @@ void HexView::DrawDisasm(Process& proc)
         const bool bad = m_asmStatus[0] == 'x';
         ImGui::TextColored(bad ? Syntax::kSystem : Syntax::kDim, "last: %s", bad ? m_asmStatus.c_str() + 2 : m_asmStatus.c_str());
     }
+
+    // A larger multi-line assembler editor: type several instructions (one per line) with syntax
+    // highlighting, then write them in sequence at the cursor.
+    if (ImGui::SmallButton(m_asmBig ? ICON_CODE "  Collapse editor" : ICON_CODE "  Expand editor"))
+        m_asmBig = !m_asmBig;
+    ImGui::SetItemTooltip("A bigger box to freely type several instructions (one per line), highlighted.");
+    if (m_asmBig)
+    {
+        Glass::CodeEditor("##asmbig", m_asmBigText, ImVec2(-FLT_MIN, Px(150)), 1, monoFont);
+
+        // Join the lines into one ';'-separated program and assemble it at the cursor.
+        std::string joined;
+        for (size_t s = 0; s < m_asmBigText.size() || s == 0;)
+        {
+            size_t nl = m_asmBigText.find('\n', s);
+            std::string ln = m_asmBigText.substr(s, nl == std::string::npos ? std::string::npos : nl - s);
+            size_t a = ln.find_first_not_of(" \t\r");
+            if (a != std::string::npos)
+            {
+                size_t b = ln.find_last_not_of(" \t\r");
+                std::string t = ln.substr(a, b - a + 1);
+                if (!(t.size() >= 2 && t[0] == '/' && t[1] == '/')) // skip // comment lines
+                {
+                    if (!joined.empty()) joined += " ; ";
+                    joined += t;
+                }
+            }
+            if (nl == std::string::npos) break;
+            s = nl + 1;
+        }
+
+        std::vector<AsmPart> bparts;
+        std::string berr;
+        bool bok = !joined.empty() && AssembleLine(proc, joined, m_cursor, bparts, berr);
+        std::vector<uint8_t> bbytes;
+        for (const auto& p : bparts) bbytes.insert(bbytes.end(), p.bytes.begin(), p.bytes.end());
+
+        ImGui::BeginDisabled(!bok);
+        if (Glass::AccentButton(ICON_FLASH "  Assemble all at cursor"))
+        {
+            if (writeInPlace(bbytes, "multi (" + std::to_string(bparts.size()) + " insns)"))
+                m_asmStatus = BytesToHex(bbytes.data(), bbytes.size());
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (bok) ImGui::TextDisabled("%d instructions, %d bytes (written in sequence from the cursor)",
+                                     (int)bparts.size(), (int)bbytes.size());
+        else if (!joined.empty()) ImGui::TextColored(Syntax::kSystem, ICON_WARNING " %s", berr.c_str());
+    }
+
     ImGui::Separator();
 
     if (monoFont) ImGui::PushFont(monoFont);

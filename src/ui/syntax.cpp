@@ -358,4 +358,24 @@ ImVec2 DrawCppCode(ImDrawList* dl, ImVec2 origin, const char* s, float alpha)
     }
     return ImVec2(maxX - origin.x, (pos.y + lineH) - origin.y);
 }
+
+ImVec2 DrawAsmCode(ImDrawList* dl, ImVec2 origin, const char* s, float alpha)
+{
+    const float lineH = ImGui::GetTextLineHeight();
+    float y = origin.y, maxX = origin.x;
+    const char* p = s;
+    while (true)
+    {
+        const char* nl = p;
+        while (*nl && *nl != '\n') nl++;
+        std::string line(p, nl);
+        while (!line.empty() && line.back() == '\r') line.pop_back();
+        float endX = DrawInstruction(dl, ImVec2(origin.x, y), line.c_str(), alpha);
+        if (endX > maxX) maxX = endX;
+        y += lineH;
+        if (!*nl) break;
+        p = nl + 1;
+    }
+    return ImVec2(maxX - origin.x, y - origin.y);
+}
 } // namespace Syntax

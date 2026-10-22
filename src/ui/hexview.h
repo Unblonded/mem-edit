@@ -54,6 +54,8 @@ private:
     bool m_disasm = false;
     char m_asmInput[512] = "";
     std::string m_asmStatus;
+    bool m_asmBig = false;          // the larger multi-line assembler editor is open
+    std::string m_asmBigText;       // its contents (one instruction per line)
     bool m_refocusAsm = false; // keep the assembler box focused after an Enter
     struct AsmUndo
     {
