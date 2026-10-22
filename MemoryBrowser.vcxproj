@@ -87,6 +87,7 @@
     <ClCompile Include="src\code\patches.cpp" />
     <ClCompile Include="src\code\detour.cpp" />
     <ClCompile Include="src\code\opcodes.cpp" />
+    <ClCompile Include="src\code\asmline.cpp" />
     <ClCompile Include="src\scan\pointerscan.cpp" />
     <ClCompile Include="src\scan\aobscan.cpp" />
     <ClCompile Include="src\ui\glass.cpp" />
@@ -142,6 +143,7 @@
     <ClInclude Include="src\code\patches.h" />
     <ClInclude Include="src\code\detour.h" />
     <ClInclude Include="src\code\opcodes.h" />
+    <ClInclude Include="src\code\asmline.h" />
     <ClInclude Include="src\scan\pointerscan.h" />
     <ClInclude Include="src\scan\aobscan.h" />
     <ClInclude Include="src\ui\glass.h" />

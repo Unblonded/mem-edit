@@ -4,6 +4,7 @@
 #include "ui/glass.h"
 #include "ui/icons.h"
 #include "ui/syntax.h"
+#include "code/asmline.h"
 #include "imgui.h"
 #include "ui/ui.h"
 
@@ -499,93 +500,255 @@ void HexView::DrawDisasm(Process& proc)
 {
     ImGuiIO& io = ImGui::GetIO();
 
-    // --- Assembler bar: type one instruction and write it at the cursor ---
+    // --- Assembler bar: assemble one or more instructions at the cursor ---------------------
+    ZydisDecoder asmDec;
+    ZydisDecoderInit(&asmDec, proc.Is64() ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
+                     proc.Is64() ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
+    ZydisFormatter asmFmt;
+    ZydisFormatterInit(&asmFmt, ZYDIS_FORMATTER_STYLE_INTEL);
+    ZydisFormatterSetProperty(&asmFmt, ZYDIS_FORMATTER_PROP_FORCE_SIZE, ZYAN_TRUE);
+    struct Decoded
+    {
+        bool ok = false;
+        int len = 1;
+        std::string text;
+    };
+    auto decodeBytes = [&](const uint8_t* b, size_t n, uint64_t at) {
+        Decoded d;
+        ZydisDecodedInstruction ins;
+        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+        if (n > 0 && ZYAN_SUCCESS(ZydisDecoderDecodeFull(&asmDec, b, n, &ins, ops)))
+        {
+            char t[128];
+            ZydisFormatterFormatInstruction(&asmFmt, &ins, ops, ins.operand_count_visible, t, sizeof(t), at, nullptr);
+            d.ok = true;
+            d.len = ins.length;
+            d.text = t;
+        }
+        return d;
+    };
+    auto decodeAt = [&](uint64_t at) {
+        uint8_t b[16];
+        size_t g = proc.Read(at, b, sizeof(b));
+        return decodeBytes(b, g, at);
+    };
+    const Decoded cur = decodeAt(m_cursor);
+
+    // Row 1: where, and what is there now.
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("asm @");
     ImGui::SameLine(0, 4);
     ImGui::TextUnformatted(proc.Symbolize(m_cursor).c_str());
-    // Disassemble the instruction under the cursor so Tab can drop it into the box to edit.
-    std::string curText;
-    {
-        uint8_t b[16];
-        size_t g = proc.Read(m_cursor, b, sizeof(b));
-        ZydisDecoder d;
-        ZydisDecoderInit(&d, proc.Is64() ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
-                         proc.Is64() ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
-        ZydisDecodedInstruction ins;
-        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
-        if (g > 0 && ZYAN_SUCCESS(ZydisDecoderDecodeFull(&d, b, g, &ins, ops)))
+    ImGui::SameLine(0, Px(14));
+    if (monoFont) ImGui::PushFont(monoFont);
+    if (cur.ok) Syntax::Instruction(cur.text.c_str());
+    else ImGui::TextDisabled("(not code)");
+    if (monoFont) ImGui::PopFont();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d byte%s - Tab loads it", cur.len, cur.len == 1 ? "" : "s");
+
+    // Row 2: the input, Assemble / NOP / Undo.
+    struct CallbackData { const char* fill; HexView* self; };
+    CallbackData cbData{ cur.ok ? cur.text.c_str() : "", this };
+    auto inputCb = [](ImGuiInputTextCallbackData* data) -> int {
+        auto* cd = (CallbackData*)data->UserData;
+        HexView* self = cd->self;
+        auto replace = [&](const std::string& s) {
+            data->DeleteChars(0, data->BufTextLen);
+            data->InsertChars(0, s.c_str());
+        };
+        if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion && cd->fill && *cd->fill) replace(cd->fill);
+        else if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory && !self->m_asmHistory.empty())
         {
-            ZydisFormatter f;
-            ZydisFormatterInit(&f, ZYDIS_FORMATTER_STYLE_INTEL);
-            ZydisFormatterSetProperty(&f, ZYDIS_FORMATTER_PROP_FORCE_SIZE, ZYAN_TRUE);
-            char t[128];
-            ZydisFormatterFormatInstruction(&f, &ins, ops, ins.operand_count_visible, t, sizeof(t), m_cursor, nullptr);
-            curText = t;
+            // Up walks back through earlier lines, Down forward again and finally to an empty box.
+            int n = (int)self->m_asmHistory.size();
+            int& pos = self->m_asmHistPos;
+            if (data->EventKey == ImGuiKey_UpArrow) pos = pos < 0 ? n - 1 : (pos > 0 ? pos - 1 : 0);
+            else if (data->EventKey == ImGuiKey_DownArrow && pos >= 0) pos = pos + 1 < n ? pos + 1 : -1;
+            replace(pos >= 0 ? self->m_asmHistory[pos] : "");
         }
-    }
-    auto fillCb = [](ImGuiInputTextCallbackData* data) -> int {
-        const char* t = (const char*)data->UserData;
-        if (t && *t) { data->DeleteChars(0, data->BufTextLen); data->InsertChars(0, t); }
         return 0;
     };
 
-    ImGui::SameLine();
-    if (m_refocusAsm) { ImGui::SetKeyboardFocusHere(); m_refocusAsm = false; }
-    ImGui::SetNextItemWidth(Px(330));
-    bool enter = ImGui::InputTextWithHint("##asm", "type asm, or Tab to load this instruction", m_asmInput,
-                                          sizeof(m_asmInput),
-                                          ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackCompletion,
-                                          fillCb, (void*)curText.c_str());
-    ImGui::SetItemTooltip("Intel syntax. Immediates are decimal unless prefixed 0x. An absolute\n"
-                          "[address] is written RIP-relative. Tab fills the current instruction to edit.\n"
-                          "Shorter than the current instruction is NOP-padded; a larger one is\n"
-                          "routed through a trampoline cave automatically.");
-    ImGui::SameLine();
-    if ((ImGui::Button("Assemble") || enter) && m_asmInput[0])
+    // Live assembly of what's typed, and how much of the existing code it covers.
+    std::vector<AsmPart> parts;
+    std::string asmErr;
+    const bool have = m_asmInput[0] && AssembleLine(proc, m_asmInput, m_cursor, parts, asmErr);
+    std::vector<uint8_t> bytes;
+    for (const auto& p : parts) bytes.insert(bytes.end(), p.bytes.begin(), p.bytes.end());
+    int covered = 0, coveredLen = 0;
+    for (uint64_t a = m_cursor; have && coveredLen < (int)bytes.size() && covered < 64; covered++)
     {
-        if (enter) m_refocusAsm = true; // stay in the box so you can keep assembling
-        std::vector<uint8_t> bytes;
-        std::string err;
-        if (!AssembleInstruction(m_asmInput, proc.Is64(), m_cursor, bytes, err)) m_asmStatus = "x " + err;
+        Decoded c = decodeAt(a);
+        coveredLen += c.len;
+        a += c.len;
+    }
+    const int newLen = (int)bytes.size();
+    const bool grows = have && newLen > cur.len;
+    const bool viaCave = grows && (bool)onAssembleHook;
+
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const char* asmLabel = viaCave ? ICON_FLASH "  Assemble via cave" : ICON_FLASH "  Assemble";
+    const float asmW = ImGui::CalcTextSize(asmLabel).x + st.FramePadding.x * 2;
+    const float nopW = ImGui::CalcTextSize("NOP").x + st.FramePadding.x * 2;
+    const float undoW = ImGui::CalcTextSize(ICON_UNDO " Undo").x + st.FramePadding.x * 2;
+    if (m_refocusAsm) { ImGui::SetKeyboardFocusHere(); m_refocusAsm = false; }
+    ImGui::SetNextItemWidth(std::max(Px(200), ImGui::GetContentRegionAvail().x - asmW - nopW - undoW - st.ItemSpacing.x * 3));
+    if (monoFont) ImGui::PushFont(monoFont);
+    bool enter = ImGui::InputTextWithHint("##asm", "mov eax, 1 ; jmp game.exe+1F00 ; nop 3 ; db 90 C3", m_asmInput,
+                                          sizeof(m_asmInput),
+                                          ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackCompletion |
+                                              ImGuiInputTextFlags_CallbackHistory,
+                                          inputCb, &cbData);
+    if (monoFont) ImGui::PopFont();
+    ImGui::SetItemTooltip("Intel syntax; separate several instructions with ;\n"
+                          "Immediates are decimal unless prefixed 0x. jmp / call / jcc take an address or an\n"
+                          "expression (game.exe+1F00, hex). nop 5 = one 5-byte NOP; db 90 C3 = raw bytes.\n"
+                          "Tab loads the current instruction, Up / Down recall earlier lines.");
+
+    // Writes `w` at the cursor, remembering what was there for Undo.
+    auto writeInPlace = [&](const std::vector<uint8_t>& w, const std::string& what) {
+        std::vector<uint8_t> old(w.size());
+        if (!proc.ReadExact(m_cursor, old.data(), old.size())) { m_asmStatus = "x can't read the bytes being replaced"; return false; }
+        if (!proc.Write(m_cursor, w.data(), w.size())) { m_asmStatus = "x write failed (page protected?)"; return false; }
+        m_asmUndo.push_back({ m_cursor, std::move(old), what });
+        if (m_asmUndo.size() > 64) m_asmUndo.erase(m_asmUndo.begin());
+        if (onLog) onLog("asm: " + what + " -> " + BytesToHex(w.data(), w.size()) + " at " + proc.Symbolize(m_cursor));
+        return true;
+    };
+    auto remember = [&] {
+        std::string line = m_asmInput;
+        if (m_asmHistory.empty() || m_asmHistory.back() != line) m_asmHistory.push_back(line);
+        if (m_asmHistory.size() > 100) m_asmHistory.erase(m_asmHistory.begin());
+        m_asmHistPos = -1;
+    };
+    // Pad to a whole-instruction boundary so no half instruction is left behind.
+    auto padded = [&](int toLen) {
+        std::vector<uint8_t> w = bytes;
+        if ((int)w.size() < toLen)
+        {
+            auto pad = NopFill((size_t)(toLen - (int)w.size()));
+            w.insert(w.end(), pad.begin(), pad.end());
+        }
+        return w;
+    };
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!have);
+    bool doAssemble = Glass::AccentButton(asmLabel, ImVec2(asmW, 0));
+    ImGui::EndDisabled();
+    if (enter && have) doAssemble = true;
+    if (enter) m_refocusAsm = true; // stay in the box to keep assembling
+    if (doAssemble)
+    {
+        if (viaCave)
+        {
+            // Too big to fit in place: the host routes it through a trampoline cave.
+            std::string res;
+            if (onAssembleHook(m_cursor, bytes, res))
+            {
+                m_asmStatus = BytesToHex(bytes.data(), bytes.size()) + "  -> cave: " + res + "  (undo it from the Detours tab)";
+                remember();
+            }
+            else m_asmStatus = "x " + res;
+        }
         else
         {
-            ZydisDecoder d;
-            ZydisDecoderInit(&d, proc.Is64() ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
-                             proc.Is64() ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32);
-            uint8_t cb[16];
-            size_t cg = proc.Read(m_cursor, cb, sizeof(cb));
-            ZydisDecodedInstruction ci;
-            int curLen = (cg > 0 && ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&d, nullptr, cb, cg, &ci))) ? ci.length
-                                                                                                           : (int)bytes.size();
-            if ((int)bytes.size() > curLen && onAssembleHook)
+            const int target = grows ? coveredLen : cur.len;
+            if (writeInPlace(padded(target), m_asmInput))
             {
-                // Too big to fit in place: let the host route it through a trampoline cave.
-                std::string st;
-                if (onAssembleHook(m_cursor, bytes, st)) m_asmStatus = BytesToHex(bytes.data(), bytes.size()) + "  (routed through a cave: " + st + ")";
-                else m_asmStatus = "x " + st;
-            }
-            else
-            {
-                std::vector<uint8_t> w = bytes;
-                std::string note;
-                if ((int)w.size() < curLen) { w.resize(curLen, 0x90); note = "  (padded to " + std::to_string(curLen) + " with NOPs)"; }
-                else if ((int)bytes.size() > curLen) note = "  (grew past the original - overwrote following bytes)";
-
-                if (proc.Write(m_cursor, w.data(), w.size()))
-                {
-                    m_asmStatus = BytesToHex(bytes.data(), bytes.size()) + note;
-                    if (onLog) onLog("asm: " + std::string(m_asmInput) + " -> " + BytesToHex(bytes.data(), bytes.size()));
-                }
-                else m_asmStatus = "x write failed (page protected?)";
+                m_asmStatus = BytesToHex(bytes.data(), bytes.size()) +
+                              (newLen < target ? "  (+" + std::to_string(target - newLen) + " NOP bytes)" : "");
+                remember();
             }
         }
     }
-    if (!m_asmStatus.empty())
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!cur.ok);
+    if (ImGui::Button("NOP", ImVec2(nopW, 0)) && writeInPlace(NopFill((size_t)cur.len), "nop " + cur.text))
+        m_asmStatus = "NOPed " + cur.text + " (" + std::to_string(cur.len) + " bytes)";
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Replace the instruction at the cursor with a NOP of the same length");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(m_asmUndo.empty());
+    if (ImGui::Button(ICON_UNDO " Undo", ImVec2(undoW, 0)))
     {
-        ImGui::SameLine();
-        ImGui::TextColored(m_asmStatus[0] == 'x' ? ImVec4(1, 0.5f, 0.5f, 1) : ImVec4(0.55f, 0.8f, 1, 1), "%s",
-                           m_asmStatus.c_str());
+        AsmUndo u = m_asmUndo.back();
+        m_asmUndo.pop_back();
+        if (proc.Write(u.address, u.original.data(), u.original.size()))
+        {
+            m_cursor = m_selAnchor = u.address;
+            m_asmStatus = "Restored " + std::to_string(u.original.size()) + " bytes at " + proc.Symbolize(u.address);
+            if (onLog) onLog("asm: undid '" + u.what + "' at " + proc.Symbolize(u.address));
+        }
+        else m_asmStatus = "x undo failed: couldn't write " + proc.Symbolize(u.address);
+    }
+    ImGui::EndDisabled();
+    if (!m_asmUndo.empty()) ImGui::SetItemTooltip("Undo '%s' at %s", m_asmUndo.back().what.c_str(), proc.Symbolize(m_asmUndo.back().address).c_str());
+
+    // Row 3: live preview while typing, otherwise the result of the last action.
+    if (m_asmInput[0])
+    {
+        if (!have) ImGui::TextColored(Syntax::kSystem, ICON_WARNING " %s", asmErr.c_str());
+        else
+        {
+            if (monoFont) ImGui::PushFont(monoFont);
+            ImGui::TextColored(Syntax::kNumber, "%s", BytesToHex(bytes.data(), bytes.size()).c_str());
+            for (const auto& p : parts)
+            {
+                ImGui::SameLine(0, Px(14));
+                ImGui::TextDisabled("|");
+                ImGui::SameLine(0, Px(14));
+                Decoded d = decodeBytes(p.bytes.data(), p.bytes.size(), p.address);
+                if (d.ok && d.len == (int)p.bytes.size()) Syntax::Instruction(d.text.c_str());
+                else ImGui::TextUnformatted(p.source.c_str()); // multi-instruction output (long call, nop n, db)
+            }
+            if (monoFont) ImGui::PopFont();
+
+            // What happens to the code that's there now.
+            const char* curText = cur.ok ? cur.text.c_str() : "the bytes here";
+            if (newLen == cur.len)
+                ImGui::TextColored(Syntax::kModule, "Exact fit - replaces %s.", curText);
+            else if (newLen < cur.len)
+                ImGui::TextColored(Syntax::kModule, "Fits - replaces %s; the spare %d byte%s become a NOP.", curText,
+                                   cur.len - newLen, cur.len - newLen == 1 ? "" : "s");
+            else
+            {
+                ImGui::TextColored(Syntax::kCall, ICON_WARNING " %d bytes - longer than %s (%d).", newLen, curText, cur.len);
+                ImGui::SameLine();
+                if (viaCave)
+                {
+                    ImGui::TextDisabled("Assemble routes it through a code cave, or");
+                    ImGui::SameLine();
+                    char label[96];
+                    snprintf(label, sizeof(label), "overwrite the next %d instruction%s##ovw", covered, covered == 1 ? "" : "s");
+                    if (ImGui::SmallButton(label) && writeInPlace(padded(coveredLen), m_asmInput))
+                    {
+                        m_asmStatus = BytesToHex(bytes.data(), bytes.size()) + "  (overwrote " + std::to_string(covered) +
+                                      " instructions, " + std::to_string(coveredLen - newLen) + " NOP bytes)";
+                        remember();
+                    }
+                    ImGui::SetItemTooltip("Writes in place over %d bytes (whole instructions), NOP-padding the rest.\n"
+                                          "Only safe if nothing jumps into the middle of them.",
+                                          coveredLen);
+                }
+                else
+                    ImGui::TextDisabled("It will overwrite the next %d instruction%s (%d bytes, NOP-padded).", covered,
+                                        covered == 1 ? "" : "s", coveredLen);
+            }
+        }
+    }
+    else if (!m_asmStatus.empty())
+    {
+        const bool bad = m_asmStatus[0] == 'x';
+        ImGui::TextColored(bad ? Syntax::kSystem : Syntax::kMove, "%s%s", bad ? ICON_WARNING " " : "", bad ? m_asmStatus.c_str() + 2 : m_asmStatus.c_str());
+    }
+    else ImGui::TextDisabled("Type an instruction above. The bytes and how it fits show up here before anything is written.");
+    if (m_asmInput[0] && !m_asmStatus.empty())
+    {
+        // Keep the last result visible after a write too, under the preview.
+        const bool bad = m_asmStatus[0] == 'x';
+        ImGui::TextColored(bad ? Syntax::kSystem : Syntax::kDim, "last: %s", bad ? m_asmStatus.c_str() + 2 : m_asmStatus.c_str());
     }
     ImGui::Separator();
 

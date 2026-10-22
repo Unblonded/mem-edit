@@ -52,9 +52,18 @@ private:
     uint64_t m_selAnchor = 0;
     int m_bytesPerRow = 16;
     bool m_disasm = false;
-    char m_asmInput[128] = "";
+    char m_asmInput[512] = "";
     std::string m_asmStatus;
     bool m_refocusAsm = false; // keep the assembler box focused after an Enter
+    struct AsmUndo
+    {
+        uint64_t address;
+        std::vector<uint8_t> original; // bytes that were there before the write
+        std::string what;
+    };
+    std::vector<AsmUndo> m_asmUndo;      // in-place writes, newest last
+    std::vector<std::string> m_asmHistory; // assembled lines, newest last (Up/Down in the box)
+    int m_asmHistPos = -1;
     int m_nibble = 0;
     bool m_asciiFocus = false;
     bool m_dragging = false;

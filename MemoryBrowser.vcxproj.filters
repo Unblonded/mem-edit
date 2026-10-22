@@ -38,6 +38,7 @@
     <ClCompile Include="src\code\patches.cpp"><Filter>src\code</Filter></ClCompile>
     <ClCompile Include="src\code\detour.cpp"><Filter>src\code</Filter></ClCompile>
     <ClCompile Include="src\code\opcodes.cpp"><Filter>src\code</Filter></ClCompile>
+    <ClCompile Include="src\code\asmline.cpp"><Filter>src\code</Filter></ClCompile>
     <ClCompile Include="src\ui\glass.cpp"><Filter>src\ui</Filter></ClCompile>
     <ClCompile Include="src\ui\syntax.cpp"><Filter>src\ui</Filter></ClCompile>
     <ClCompile Include="src\scan\pointerscan.cpp"><Filter>src\scan</Filter></ClCompile>
@@ -62,6 +63,7 @@
     <ClInclude Include="src\code\patches.h"><Filter>src\code</Filter></ClInclude>
     <ClInclude Include="src\code\detour.h"><Filter>src\code</Filter></ClInclude>
     <ClInclude Include="src\code\opcodes.h"><Filter>src\code</Filter></ClInclude>
+    <ClInclude Include="src\code\asmline.h"><Filter>src\code</Filter></ClInclude>
     <ClInclude Include="src\ui\glass.h"><Filter>src\ui</Filter></ClInclude>
     <ClInclude Include="src\scan\pointerscan.h"><Filter>src\scan</Filter></ClInclude>
     <ClInclude Include="src\scan\aobscan.h"><Filter>src\scan</Filter></ClInclude>
