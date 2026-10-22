@@ -2560,13 +2560,13 @@ void App::DrawDetourMenu(uint64_t a)
             m_focusDetourTarget = true;
         }
         ImGui::SetItemTooltip("Opens the Detours tab with this entry selected; type where it should jump to.");
+        if (m_proc.Is64() && ImGui::MenuItem(ICON_CODE "  Hook with C++..."))
+            OpenCppHooks(a);
+        ImGui::SetItemTooltip("Opens the C++ Hooks window: write C++ that runs on every call to this\n"
+                              "function (or on demand) and recompile it live.");
         if (ImGui::MenuItem(ICON_SETTINGS "  Open in Detours tab...")) OpenDetours(a);
         ImGui::EndMenu();
     }
-    if (m_proc.Is64() && ImGui::MenuItem(ICON_CODE "  Hook with C++..."))
-        OpenCppHooks(a);
-    ImGui::SetItemTooltip("Opens the C++ Hooks window: write C++ that runs on every call to this\n"
-                          "function (or on demand) and recompile it live.");
 }
 
 void App::OpenCppHooks(uint64_t entry)
