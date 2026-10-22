@@ -87,6 +87,7 @@
     <ClCompile Include="src\code\decompiler.cpp" />
     <ClCompile Include="src\code\patches.cpp" />
     <ClCompile Include="src\code\detour.cpp" />
+    <ClCompile Include="src\code\cpphook.cpp" />
     <ClCompile Include="src\code\opcodes.cpp" />
     <ClCompile Include="src\code\asmline.cpp" />
     <ClCompile Include="src\scan\pointerscan.cpp" />
@@ -145,6 +146,10 @@
     <ClInclude Include="src\code\decompiler.h" />
     <ClInclude Include="src\code\patches.h" />
     <ClInclude Include="src\code\detour.h" />
+    <ClInclude Include="src\code\cpphook.h" />
+    <ClInclude Include="src\code\cpphook_ipc.h" />
+    <ClInclude Include="src\code\cpphook_embedded.h" />
+    <ClInclude Include="src\code\memhook.h" />
     <ClInclude Include="src\code\opcodes.h" />
     <ClInclude Include="src\code\asmline.h" />
     <ClInclude Include="src\scan\pointerscan.h" />

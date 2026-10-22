@@ -563,6 +563,114 @@ bool DetourManager::EditCaveCode(const Process& proc, uint64_t addr, const std::
     return true;
 }
 
+bool DetourManager::InstallHook(const Process& proc, uint64_t entry, uint64_t hookFn, uint64_t& trampoline,
+                                std::string& error)
+{
+    if (!proc.IsOpen()) { error = "No process attached"; return false; }
+    if (!proc.Is64()) { error = "C++ hooks need a 64-bit target."; return false; }
+    if (Find(entry)) { error = "This address is already detoured. Remove it first."; return false; }
+
+    const size_t jsz = JumpSize(true);
+    size_t stolen = 0;
+    if (!StealLength(proc, entry, jsz, stolen, error)) return false;
+
+    std::vector<uint8_t> original(stolen);
+    if (!proc.ReadExact(entry, original.data(), original.size()))
+    {
+        error = "Could not read the original bytes at " + Hex(entry);
+        return false;
+    }
+
+    // Does the stolen block end in a jmp/ret? Then it never falls through and needs no jump back.
+    bool fallsThrough = true;
+    {
+        ZydisDecoder ddec;
+        ZydisDecoderInit(&ddec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+        size_t off = 0;
+        ZydisMnemonic lastM = ZYDIS_MNEMONIC_INVALID;
+        while (off < original.size())
+        {
+            ZydisDecodedInstruction ins;
+            if (!ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&ddec, nullptr, original.data() + off,
+                                                            original.size() - off, &ins)))
+                break;
+            lastM = ins.mnemonic;
+            off += ins.length;
+        }
+        fallsThrough = !(lastM == ZYDIS_MNEMONIC_JMP || lastM == ZYDIS_MNEMONIC_RET);
+    }
+
+    // 16-byte dispatch: FF 25 02 00 00 00 (jmp [rip+2]), two int3s, then the 8-byte aligned slot.
+    constexpr size_t kDispatch = 16;
+    const size_t caveSize = kDispatch + stolen + (fallsThrough ? jsz : 0);
+    LPVOID cave = AllocNear(proc.Handle(), entry, caveSize);
+    if (!cave)
+        cave = VirtualAllocEx(proc.Handle(), nullptr, caveSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!cave) { error = "VirtualAllocEx failed (code cave could not be allocated)."; return false; }
+    const uint64_t caveAddr = (uint64_t)cave;
+    const uint64_t tramp = caveAddr + kDispatch;
+
+    std::vector<uint8_t> relocated = original;
+    if (!RelocateStolen(true, entry, tramp, relocated, error))
+    {
+        VirtualFreeEx(proc.Handle(), cave, 0, MEM_RELEASE);
+        return false;
+    }
+
+    std::vector<uint8_t> caveBytes(caveSize, 0xCC);
+    const uint8_t dispatch[8] = { 0xFF, 0x25, 0x02, 0x00, 0x00, 0x00, 0xCC, 0xCC };
+    memcpy(caveBytes.data(), dispatch, sizeof(dispatch));
+    // hookFn == 0 means "passthrough": point the slot at the trampoline so the hook runs the
+    // original unchanged until a build with an OnCall publishes a real callback to swap in.
+    uint64_t slot = hookFn ? hookFn : tramp;
+    memcpy(caveBytes.data() + 8, &slot, 8);
+    memcpy(caveBytes.data() + kDispatch, relocated.data(), stolen);
+    if (fallsThrough)
+    {
+        std::vector<uint8_t> back = MakeJump(tramp + stolen, entry + stolen, true);
+        memcpy(caveBytes.data() + kDispatch + stolen, back.data(), back.size());
+    }
+    if (!proc.Write(caveAddr, caveBytes.data(), caveBytes.size()))
+    {
+        error = "Could not write the code cave.";
+        VirtualFreeEx(proc.Handle(), cave, 0, MEM_RELEASE);
+        return false;
+    }
+
+    std::vector<uint8_t> hook = MakeJump(entry, caveAddr, true);
+    hook.resize(stolen, 0x90);
+    if (!proc.Write(entry, hook.data(), hook.size()))
+    {
+        error = "Write failed at " + Hex(entry) + " (page protected?)";
+        VirtualFreeEx(proc.Handle(), cave, 0, MEM_RELEASE);
+        return false;
+    }
+
+    Detour d;
+    d.entry = entry;
+    d.original = original;
+    d.hook = hook;
+    d.target = slot;
+    d.cave = caveAddr;
+    d.caveSize = caveSize;
+    d.stolenLen = stolen;
+    d.kind = "C++ hook";
+    d.location = proc.Symbolize(entry);
+    m_detours.push_back(std::move(d));
+    trampoline = tramp;
+    return true;
+}
+
+bool DetourManager::SetHookTarget(const Process& proc, uint64_t entry, uint64_t hookFn)
+{
+    Detour* d = FindMutable(entry);
+    if (!d || d->kind != "C++ hook") return false;
+    // One aligned 8-byte store, so a thread passing through the dispatch sees the old or new target.
+    if (!proc.Write(d->cave + 8, &hookFn, 8)) return false;
+    d->target = hookFn;
+    return true;
+}
+
 void DetourManager::SetEnabled(const Process& proc, uint64_t entry, bool enabled)
 {
     Detour* d = FindMutable(entry);

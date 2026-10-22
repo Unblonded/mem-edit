@@ -50,6 +50,12 @@ Dear ImGui v1.91.9-docking is vendored in `third_party/imgui`, and Zydis v4.1.1 
     grow the instruction.
   - **Patches** – every change is tracked here with the original bytes kept, so each can be toggled off/on or
     removed, individually or all at once. Patches live only in the target's memory.
+- **C++ hooks** – hook a function and write C++ that runs inside the target, recompiled live (Tools → C++ hooks,
+  or right-click a function → *Hook with C++*). mem-edit compiles your code with the Visual C++ toolchain, injects
+  it, and hot-swaps it on each rebuild. Two entry points, both optional: `OnCall(Regs*)` runs on every call (edit
+  `rcx`/`rdx`/`r8`/`r9` to change the arguments, or set `skipOriginal` to suppress the original), and `OnRun(args)`
+  runs on demand from the window with custom parameters. `Original` calls the un-hooked function, and `Print` /
+  `Read<T>` / `Write<T>` talk to the target. 64-bit targets.
 
 ## Practice target
 

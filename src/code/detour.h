@@ -58,6 +58,15 @@ public:
     bool EditCaveCode(const Process& proc, uint64_t addr, const std::vector<uint8_t>& newInsn,
                       std::string& error);
 
+    // Routes `entry` to native code at `hookFn` (a C++ function in an injected DLL, say). The cave is
+    //   [jmp [slot]][slot: hookFn][relocated stolen instructions][jump back]
+    // and `trampoline` receives the address of the stolen part, which runs the original function.
+    // SetHookTarget rewrites the slot, so a recompiled hook takes over without touching the entry.
+    // x64 only.
+    bool InstallHook(const Process& proc, uint64_t entry, uint64_t hookFn, uint64_t& trampoline,
+                     std::string& error);
+    bool SetHookTarget(const Process& proc, uint64_t entry, uint64_t hookFn);
+
     void SetEnabled(const Process& proc, uint64_t entry, bool enabled);
     void Remove(const Process& proc, uint64_t entry);  // restores original, frees the cave
     void RestoreAll(const Process& proc);

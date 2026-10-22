@@ -1,6 +1,7 @@
 #pragma once
 #include "code/decompiler.h"
 #include "code/detour.h"
+#include "code/cpphook.h"
 #include "ui/hexview.h"
 #include "code/patches.h"
 #include "scan/aobscan.h"
@@ -77,6 +78,8 @@ private:
     void DrawDetourMenu(uint64_t address);   // right-click "Detour this function" items
     void OpenDetours(uint64_t entry);        // Decompile window, Detours tab, entry selected
     void InstallCaveAt(uint64_t entry);      // one-click trampoline with the recommended size
+    void DrawCppHooks();                     // the "C++ Hooks" window: compile, inject, run live C++
+    void OpenCppHooks(uint64_t entry);       // open it targeting `entry`
     void DrawAobScan();
     void DrawAobScanTab();
     void DrawSigMakerTab();
@@ -187,6 +190,16 @@ private:
     std::string m_detourStatus;
     int m_decompileTabRequest = -1;  // select this Decompile tab on the next frame (3 = Detours)
     bool m_focusDetourTarget = false; // put the cursor in "redirect to" when the Detours tab opens
+
+    // C++ Hooks: compile typed C++ to a DLL, inject it, and run it live against a hooked function.
+    CppHook m_cpp;
+    bool m_showCppHook = false;
+    char m_cppEntry[256] = "";        // address/expression of the function to hook
+    uint64_t m_cppHookedEntry = 0;    // the entry we actually hooked (0 = none)
+    std::string m_cppSource;          // the code editor contents
+    std::string m_cppLog;             // build + run output
+    char m_cppRunArgs[512] = "";      // params passed to OnRun
+    bool m_cppInit = false;           // seeded the editor with the starter template yet?
 
     // Pointer scan
     PointerScanner m_ptrScan;

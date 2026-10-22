@@ -37,6 +37,7 @@ const char* kWinLog = ICON_LOG "  Log###Log";
 const char* kWinDecompile = ICON_CODE "  Decompile###Decompile";
 const char* kWinAob = ICON_FLASH "  AOB Scan###AOB Scan";
 const char* kWinOpcodes = ICON_DOC "  Opcodes###Opcodes";
+const char* kWinCppHook = ICON_CODE "  C++ Hooks###C++ Hooks";
 
 // Status colours stay distinguishable but are muted to sit in the duotone palette.
 const ImVec4 kColErr(0.93f, 0.55f, 0.58f, 1.0f);
@@ -188,6 +189,8 @@ void App::Detach()
     if (m_proc.IsOpen()) Log("Detached from " + m_proc.Name());
     m_tracer.Shutdown();
     m_veh.Shutdown();
+    m_cpp.Detach();
+    m_cppHookedEntry = 0;
     m_traces.clear();
     m_patches.clear();
     // Undo detours and free their caves while we still have the handle.
@@ -326,6 +329,7 @@ void App::Frame()
     if (m_showDecompile) DrawDecompile();
     if (m_showCalc) DrawCalculator();
     if (m_showOpcodes) DrawOpcodes();
+    if (m_showCppHook) DrawCppHooks();
     if (m_showPtrScan) DrawPointerScan();
     if (m_showAob) DrawAobScan();
     DrawTraceWindows();
@@ -427,6 +431,7 @@ void App::DrawMenuBar()
         ImGui::MenuItem(kWinLog, nullptr, &m_showLog);
         ImGui::MenuItem(kWinDecompile, nullptr, &m_showDecompile);
         ImGui::MenuItem(kWinAob, nullptr, &m_showAob);
+        ImGui::MenuItem(kWinCppHook, nullptr, &m_showCppHook);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset layout"))
         {
@@ -440,6 +445,7 @@ void App::DrawMenuBar()
     if (ImGui::MenuItem("Opcodes")) m_showOpcodes = true;
     if (ImGui::MenuItem("Pointer scan")) m_showPtrScan = true;
     if (ImGui::MenuItem("AOB scan")) m_showAob = true;
+    if (ImGui::MenuItem("C++ hooks")) { m_showCppHook = true; ImGui::SetWindowFocus(kWinCppHook); }
     if (ImGui::BeginMenu("Debugger"))
     {
         // The two backends don't share hardware-breakpoint slots, so only switch when nothing is
@@ -2557,6 +2563,145 @@ void App::DrawDetourMenu(uint64_t a)
         if (ImGui::MenuItem(ICON_SETTINGS "  Open in Detours tab...")) OpenDetours(a);
         ImGui::EndMenu();
     }
+    if (m_proc.Is64() && ImGui::MenuItem(ICON_CODE "  Hook with C++..."))
+        OpenCppHooks(a);
+    ImGui::SetItemTooltip("Opens the C++ Hooks window: write C++ that runs on every call to this\n"
+                          "function (or on demand) and recompile it live.");
+}
+
+void App::OpenCppHooks(uint64_t entry)
+{
+    m_showCppHook = true;
+    ImGui::SetWindowFocus(kWinCppHook);
+    if (entry) snprintf(m_cppEntry, sizeof(m_cppEntry), "%llX", (unsigned long long)entry);
+}
+
+void App::DrawCppHooks()
+{
+    if (!m_cppInit)
+    {
+        m_cppSource =
+            "#include \"memhook.h\"\n"
+            "using namespace memhook;\n"
+            "\n"
+            "// Runs on EVERY call to the hooked function, inside the target. rcx/rdx/r8/r9 are the\n"
+            "// first four integer/pointer arguments (Windows x64 calling convention).\n"
+            "void OnCall(Regs* r)\n"
+            "{\n"
+            "    Print(\"called: arg1=%llu arg2=%llu\\n\", r->rcx, r->rdx);\n"
+            "    // r->rcx = 999;          // change an argument before the original runs\n"
+            "    // r->skipOriginal = 1;   // or stop the original from running at all\n"
+            "}\n"
+            "\n"
+            "// Runs when you press Run, with the Params box passed as `args`.\n"
+            "void OnRun(const char* args)\n"
+            "{\n"
+            "    Print(\"Run with: %s\\n\", args);\n"
+            "    // Call the real function yourself with custom parameters:\n"
+            "    // auto fn = Fn<long long(long long, long long)>(Original);\n"
+            "    // Print(\"result = %lld\\n\", fn(2, 3));\n"
+            "}\n";
+        m_cppInit = true;
+    }
+
+    Glass::PrepareWindow(kWinCppHook);
+    ImGui::SetNextWindowSize(ImVec2(680, 620), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(kWinCppHook, &m_showCppHook)) { ImGui::End(); return; }
+
+    if (!m_proc.IsOpen())
+    {
+        Glass::EmptyState(ICON_CODE, "No process", "Attach to a 64-bit process to hook and run C++ in it.", nullptr);
+        ImGui::End();
+        return;
+    }
+
+    std::string whyNot;
+    if (!m_cpp.Available(whyNot))
+        ImGui::TextColored(kColErr, ICON_WARNING "  %s", whyNot.c_str());
+
+    // --- Target function + hook controls ---
+    ImGui::TextUnformatted("Function");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(260);
+    ImGui::InputTextWithHint("##cppentry", "address or module.exe+1F0", m_cppEntry, sizeof(m_cppEntry));
+
+    uint64_t entry = 0;
+    bool haveEntry = EvaluateAddress(m_proc, m_cppEntry, entry);
+    const bool hooked = m_cppHookedEntry && m_detours.Find(m_cppHookedEntry);
+    if (!hooked) m_cppHookedEntry = 0;
+
+    ImGui::SameLine();
+    if (!hooked)
+    {
+        if (Glass::AccentButton(ICON_FLASH "  Install hook") && haveEntry)
+        {
+            std::string err;
+            uint64_t tramp = 0;
+            if (m_detours.InstallHook(m_proc, entry, 0, tramp, err))
+            {
+                m_cppHookedEntry = entry;
+                m_cpp.Attach(m_proc, err);
+                m_cpp.SetTrampoline(tramp);
+                m_cppLog = "Hooked " + m_proc.Symbolize(entry) + " (passthrough). Compile & Apply to run your code.";
+                Log("C++ hook installed on " + m_proc.Symbolize(entry));
+            }
+            else { m_cppLog = err; Log("C++ hook failed: " + err); }
+        }
+    }
+    else
+    {
+        if (ImGui::Button(ICON_DELETE "  Remove hook"))
+        {
+            m_detours.Remove(m_proc, m_cppHookedEntry);
+            Log("Removed C++ hook on " + m_proc.Symbolize(m_cppHookedEntry));
+            m_cppHookedEntry = 0;
+        }
+    }
+
+    if (hooked)
+        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.5f, 1), ICON_SHIELD_FILL "  Hooked at %s",
+                           m_proc.Symbolize(m_cppHookedEntry).c_str());
+    else
+        ImGui::TextDisabled("Not hooked - you can still write OnRun and press Run without hooking.");
+
+    ImGui::Separator();
+
+    // --- Code editor ---
+    float footer = ImGui::GetFrameHeightWithSpacing() * 2 + 150;
+    if (m_mono) ImGui::PushFont(m_mono);
+    ImGui::InputTextMultiline("##cppsrc", &m_cppSource,
+                              ImVec2(-FLT_MIN, ImGui::GetContentRegionAvail().y - footer),
+                              ImGuiInputTextFlags_AllowTabInput);
+    if (m_mono) ImGui::PopFont();
+
+    // --- Actions ---
+    if (Glass::AccentButton(ICON_REFRESH "  Compile & Apply"))
+    {
+        std::string log;
+        bool ok = m_cpp.Apply(m_proc, m_detours, m_cppHookedEntry, m_cppSource, log);
+        m_cppLog = log;
+        Log(ok ? "C++ build applied." : "C++ build failed.");
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(240);
+    ImGui::InputTextWithHint("##cppargs", "params for OnRun", m_cppRunArgs, sizeof(m_cppRunArgs));
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_PLAY "  Run"))
+    {
+        std::string out, err;
+        if (m_cpp.Run(m_cppRunArgs, out, err)) m_cppLog = out.empty() ? "(no output)" : out;
+        else m_cppLog = err;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_DELETE "  Clear output")) m_cppLog.clear();
+
+    ImGui::TextDisabled("Output");
+    if (m_mono) ImGui::PushFont(m_mono);
+    ImGui::InputTextMultiline("##cpplog", &m_cppLog, ImVec2(-FLT_MIN, -FLT_MIN),
+                              ImGuiInputTextFlags_ReadOnly);
+    if (m_mono) ImGui::PopFont();
+
+    ImGui::End();
 }
 
 int App::RecommendCaveBytes() const
