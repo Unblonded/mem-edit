@@ -37,7 +37,7 @@
   <PropertyGroup>
     <OutDir>$(SolutionDir)bin\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)obj\$(Configuration)\</IntDir>
-    <TargetName>MemoryBrowser</TargetName>
+    <TargetName>mem-edit</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>

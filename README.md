@@ -9,7 +9,7 @@ A process memory browser / scanner / editor for Windows, built with C++20, Dear 
 ## Build
 
 Open `MemoryBrowser.sln` in Visual Studio 2026 (toolset v145, Windows 10/11 SDK) and build **Release | x64**.
-The exe lands in `bin\Release\MemoryBrowser.exe`. Run it as administrator to attach to elevated processes.
+The exe lands in `bin\Release\mem-edit.exe`. Run it as administrator to attach to elevated processes.
 
 Command line alternative (Developer PowerShell):
 

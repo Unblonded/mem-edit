@@ -1,6 +1,6 @@
 name: Build
 
-# main      -> build, upload MemoryBrowser.exe as an artifact, refresh the rolling "nightly" pre-release
+# main      -> build, upload mem-edit.exe as an artifact, refresh the rolling "nightly" pre-release
 # tag v*    -> build and publish a proper release for that tag (e.g. git tag v1.0.0 && git push --tags)
 # PRs       -> build only
 on:
@@ -34,13 +34,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item bin/Release/MemoryBrowser.exe dist/MemoryBrowser.exe
+          Copy-Item bin/Release/mem-edit.exe dist/mem-edit.exe
           Get-ChildItem dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MemoryBrowser
-          path: dist/MemoryBrowser.exe
+          name: mem-edit
+          path: dist/mem-edit.exe
 
       - name: Publish nightly pre-release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -52,8 +52,8 @@ jobs:
           gh release delete nightly --yes --cleanup-tag
           if ($LASTEXITCODE -ne 0) { Write-Host "No previous nightly to replace" }
           $short = $env:GITHUB_SHA.Substring(0, 7)
-          $notes = "Automatic build of ``main`` at $short.`n`nDownload and run **MemoryBrowser.exe** (Windows 10/11 x64, no install needed)."
-          gh release create nightly dist/MemoryBrowser.exe --prerelease --target $env:GITHUB_SHA --title "Nightly ($short)" --notes $notes
+          $notes = "Automatic build of ``main`` at $short.`n`nDownload and run **mem-edit.exe** (Windows 10/11 x64, no install needed)."
+          gh release create nightly dist/mem-edit.exe --prerelease --target $env:GITHUB_SHA --title "Nightly ($short)" --notes $notes
           exit $LASTEXITCODE
 
       - name: Publish tagged release
@@ -62,5 +62,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME dist/MemoryBrowser.exe --verify-tag --title "Memory Browser $env:GITHUB_REF_NAME" --generate-notes
+          gh release create $env:GITHUB_REF_NAME dist/mem-edit.exe --verify-tag --title "mem-edit $env:GITHUB_REF_NAME" --generate-notes
           exit $LASTEXITCODE
