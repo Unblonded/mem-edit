@@ -170,6 +170,59 @@ void DecorateWindows()
     }
 }
 
+namespace
+{
+ImGuiStyle g_baseStyle;     // the theme at the main window's DPI
+float g_mainDpi = 1.f;      // DPI the style was built for
+float g_fontBase = 1.f;     // FontGlobalScale that shows fonts at g_mainDpi (mainDpi / atlasDpi)
+float g_scale = 1.f;        // scale currently applied, relative to g_mainDpi
+bool g_dpiReady = false;
+
+void ApplyScale(float s)
+{
+    if (!g_dpiReady || fabsf(s - g_scale) < 0.01f) return;
+    g_scale = s;
+    ImGuiStyle& st = ImGui::GetStyle();
+    st = g_baseStyle;
+    if (s != 1.f) st.ScaleAllSizes(s);
+    ImGui::GetIO().FontGlobalScale = g_fontBase * s;
+    ImGui::SetCurrentFont(ImGui::GetFont()); // recompute the current font size with the new scale
+}
+
+float ViewportScale(const ImGuiViewport* vp)
+{
+    return vp && vp->DpiScale > 0.f ? vp->DpiScale / g_mainDpi : 1.f;
+}
+} // namespace
+
+void InitDpi(float mainDpi, float atlasDpi)
+{
+    g_baseStyle = ImGui::GetStyle();
+    g_mainDpi = mainDpi > 0.f ? mainDpi : 1.f;
+    g_fontBase = atlasDpi > 0.f ? mainDpi / atlasDpi : 1.f;
+    g_scale = 1.f;
+    ImGui::GetIO().FontGlobalScale = g_fontBase;
+    g_dpiReady = true;
+}
+
+void PrepareWindow(const char* name)
+{
+    // Last frame's viewport and dock state; a window not created yet takes the main window's.
+    ImGuiWindow* w = ImGui::FindWindowByName(name);
+    ApplyScale(ViewportScale(w && w->Viewport ? w->Viewport : ImGui::GetMainViewport()));
+    if (!w || !w->DockIsActive) ImGui::SetNextWindowBgAlpha(0.99f);
+}
+
+void PrepareMain()
+{
+    ApplyScale(ViewportScale(ImGui::GetMainViewport()));
+}
+
+float FontPx(const ImFont* font)
+{
+    return font->FontSize * ImGui::GetIO().FontGlobalScale;
+}
+
 Fonts& GetFonts()
 {
     static Fonts fonts;
@@ -255,7 +308,7 @@ bool EmptyState(const char* icon, const char* title, const char* hint, const cha
 
     const float badge = em * 4.6f;
     const float wrap = ImMin(avail.x - em * 2, em * 26);
-    ImVec2 titleSize = titleFont->CalcTextSizeA(titleFont->FontSize, FLT_MAX, 0, title);
+    ImVec2 titleSize = titleFont->CalcTextSizeA(FontPx(titleFont), FLT_MAX, 0, title);
     ImVec2 hintSize = ImGui::CalcTextSize(hint, nullptr, false, wrap);
     float actionH = action ? ImGui::GetFrameHeight() + em * 1.2f : 0.f;
     float total = badge + em * 1.3f + titleSize.y + em * 0.5f + hintSize.y + actionH;
@@ -269,12 +322,12 @@ bool EmptyState(const char* icon, const char* title, const char* hint, const cha
     dl->AddCircleFilled(c, badge * 0.5f, IM_COL32(255, 255, 255, 12), 64);
     dl->AddCircle(c, badge * 0.5f, IM_COL32(255, 255, 255, 34), 64, 1.f);
     dl->AddCircle(c, badge * 0.5f - em * 0.45f, Col(kAccent, 0.18f), 64, 1.f);
-    ImVec2 iconSize = iconFont->CalcTextSizeA(iconFont->FontSize, FLT_MAX, 0, icon);
-    dl->AddText(iconFont, iconFont->FontSize, ImVec2(c.x - iconSize.x * 0.5f, c.y - iconSize.y * 0.5f), Col(kAccentHi, 1.f),
+    ImVec2 iconSize = iconFont->CalcTextSizeA(FontPx(iconFont), FLT_MAX, 0, icon);
+    dl->AddText(iconFont, FontPx(iconFont), ImVec2(c.x - iconSize.x * 0.5f, c.y - iconSize.y * 0.5f), Col(kAccentHi, 1.f),
                 icon);
     y += badge + em * 1.3f;
 
-    dl->AddText(titleFont, titleFont->FontSize, ImVec2(cx - titleSize.x * 0.5f, y), ImGui::GetColorU32(ImGuiCol_Text), title);
+    dl->AddText(titleFont, FontPx(titleFont), ImVec2(cx - titleSize.x * 0.5f, y), ImGui::GetColorU32(ImGuiCol_Text), title);
     y += titleSize.y + em * 0.5f;
 
     // Hint lines centred individually.

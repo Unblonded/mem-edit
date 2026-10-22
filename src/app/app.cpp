@@ -4,6 +4,7 @@
 #include "ui/glass.h"
 #include "ui/icons.h"
 #include "ui/syntax.h"
+#include "code/opcodes.h"
 #include "imgui.h"
 #include "ui/ui.h"
 #include "imgui_internal.h"
@@ -35,6 +36,7 @@ const char* kWinModules = ICON_PUZZLE "  Modules###Modules";
 const char* kWinLog = ICON_LOG "  Log###Log";
 const char* kWinDecompile = ICON_CODE "  Decompile###Decompile";
 const char* kWinAob = ICON_FLASH "  AOB Scan###AOB Scan";
+const char* kWinOpcodes = ICON_DOC "  Opcodes###Opcodes";
 
 // Status colours stay distinguishable but are muted to sit in the duotone palette.
 const ImVec4 kColErr(0.93f, 0.55f, 0.58f, 1.0f);
@@ -116,6 +118,8 @@ void App::Init(void* hwnd, ImFont* uiFont, ImFont* monoFont)
     m_hex.onDecompile = [this](uint64_t a) { StartDecompile(a); };
     m_hex.onRequestAttach = [this] { m_openPicker = true; };
     m_hex.onMakeSignature = [this](uint64_t a) { OpenSigMaker(a); };
+    m_hex.drawDetourMenu = [this](uint64_t a) { DrawDetourMenu(a); };
+    m_hex.onExplain = [this](const std::string& insn) { OpenOpcodes(insn); };
     m_hex.onAssembleHook = [this](uint64_t a, const std::vector<uint8_t>& bytes, std::string& status) -> bool {
         // Inside an existing trampoline's cave? Never hook a cave address. Any instruction in the
         // cave ([head stolen][free][trailing jmp/jump back]) is editable except the jump back, which
@@ -288,8 +292,12 @@ void App::Frame()
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) m_openPicker = true;
 
     Glass::DrawBackdrop();
+    // Each window is drawn at the DPI of the monitor it's on (see Glass::PrepareWindow).
+    Glass::PrepareWindow("##MainMenuBar");
     DrawMenuBar();
+    Glass::PrepareWindow("##statusbar");
     DrawStatusBar();
+    Glass::PrepareMain();
 
     // The dockspace host stays clear so the backdrop shows between docked panes.
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
@@ -320,6 +328,7 @@ void App::Frame()
     if (m_showPtrScan) DrawPointerScan();
     if (m_showAob) DrawAobScan();
     DrawTraceWindows();
+    Glass::PrepareMain(); // the modals open over the main window
     DrawProcessPicker();
     DrawEditValuePopup();
     Glass::DecorateWindows();
@@ -670,6 +679,7 @@ void App::DrawProcessPicker()
 
 void App::DrawScanner()
 {
+    Glass::PrepareWindow(kWinScanner);
     if (!ImGui::Begin(kWinScanner, &m_showScanner))
     {
         ImGui::End();
@@ -879,6 +889,7 @@ void App::DrawScanner()
 
 void App::DrawResults()
 {
+    Glass::PrepareWindow(kWinResults);
     if (!ImGui::Begin(kWinResults, &m_showResults))
     {
         ImGui::End();
@@ -1157,6 +1168,7 @@ void App::DrawEditValuePopup()
 
 void App::DrawAddressList()
 {
+    Glass::PrepareWindow(kWinWatch);
     if (!ImGui::Begin(kWinWatch, &m_showWatch))
     {
         ImGui::End();
@@ -1527,6 +1539,7 @@ void App::DrawAddressList()
 
 void App::DrawRegions()
 {
+    Glass::PrepareWindow(kWinRegions);
     if (!ImGui::Begin(kWinRegions, &m_showRegions))
     {
         ImGui::End();
@@ -1678,6 +1691,7 @@ void App::DrawRegions()
 
 void App::DrawModules()
 {
+    Glass::PrepareWindow(kWinModules);
     if (!ImGui::Begin(kWinModules, &m_showModules))
     {
         ImGui::End();
@@ -1778,6 +1792,7 @@ void App::DrawModules()
 
 void App::DrawLog()
 {
+    Glass::PrepareWindow(kWinLog);
     if (!ImGui::Begin(kWinLog, &m_showLog))
     {
         ImGui::End();
@@ -1806,6 +1821,7 @@ void App::DrawLog()
 void App::DrawAbout()
 {
     ImGui::SetNextWindowSize(ImVec2(Px(520), Px(420)), ImGuiCond_FirstUseEver);
+    Glass::PrepareWindow("Help");
     if (!ImGui::Begin("Help", &m_showAbout))
     {
         ImGui::End();
@@ -1893,6 +1909,7 @@ void App::DrawTraceWindows()
         std::string title = std::string(t.kind == TraceKind::Writes ? "Writes to " : "Accesses to ") + t.label +
                             "###trace" + std::to_string(t.slot);
         ImGui::SetNextWindowSize(ImVec2(Px(720), Px(460)), ImGuiCond_FirstUseEver);
+        Glass::PrepareWindow(title.c_str());
         if (!ImGui::Begin(title.c_str(), &t.open))
         {
             ImGui::End();
@@ -2291,6 +2308,8 @@ void App::DrawDisasm()
             {
                 if (m_mono) ImGui::PopFont(); // the menu uses the normal UI face, not the table's mono one
                 if (ImGui::MenuItem(ICON_FLASH "  Make AOB signature here")) OpenSigMaker(r.address);
+                DrawDetourMenu(r.address);
+                if (ImGui::MenuItem(ICON_HELP "  Explain this instruction")) OpenOpcodes(r.text);
                 if (ImGui::MenuItem(ICON_CHIP "  Edit in Memory View"))
                 {
                     m_hex.FocusDisasm(r.address);
@@ -2387,6 +2406,7 @@ void App::DrawActivePatches()
 void App::DrawDecompile()
 {
     ImGui::SetNextWindowSize(ImVec2(Px(780), Px(600)), ImGuiCond_FirstUseEver);
+    Glass::PrepareWindow(kWinDecompile);
     if (!ImGui::Begin(kWinDecompile, &m_showDecompile))
     {
         ImGui::End();
@@ -2427,15 +2447,88 @@ void App::DrawDecompile()
             DrawActivePatches();
             ImGui::EndTabItem();
         }
-        const char* detourTab = m_detours.Empty() ? "Detours" : "Detours *";
-        if (ImGui::BeginTabItem(detourTab))
+        // "###Detours" keeps the tab's identity while the label gains a '*'.
+        const char* detourTab = m_detours.Empty() ? "Detours###Detours" : "Detours *###Detours";
+        if (ImGui::BeginTabItem(detourTab, nullptr, m_decompileTabRequest == 3 ? ImGuiTabItemFlags_SetSelected : 0))
         {
             DrawDetours();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
     }
+    m_decompileTabRequest = -1;
     ImGui::End();
+}
+
+void App::OpenDetours(uint64_t entry)
+{
+    StartDecompile(entry); // loads the function and selects `entry`, which the Detours tab acts on
+    m_decompileTabRequest = 3;
+    m_detourStatus.clear();
+}
+
+void App::InstallCaveAt(uint64_t entry)
+{
+    OpenDetours(entry);
+    std::string e;
+    const int bytes = RecommendCaveBytes();
+    if (!m_detours.InstallTrampoline(m_proc, entry, (size_t)bytes, e))
+    {
+        m_detourStatus = e;
+        Log("Detour failed at " + m_proc.Symbolize(entry) + ": " + e);
+        return;
+    }
+    const Detour* d = m_detours.Find(entry);
+    const uint64_t cave = d ? d->cave : 0;
+    m_detourStatus = "Cave at " + ToHex(cave) + " with " + std::to_string(bytes) +
+                     " free bytes - the original still runs; write your code into the cave.";
+    Log("Installed trampoline on " + m_proc.Symbolize(entry) + ", cave at " + ToHex(cave));
+    RunDecompile();
+    // Straight to the cave, where the new code goes.
+    if (cave)
+    {
+        m_hex.FocusDisasm(cave);
+        m_showHex = true;
+    }
+}
+
+void App::DrawDetourMenu(uint64_t a)
+{
+    if (!m_proc.IsOpen()) return;
+    RegionInfo region;
+    if (!m_proc.QueryRegion(a, region) || !IsExecutable(region.protect)) return; // only code can be detoured
+    if (const Detour* d = m_detours.Find(a))
+    {
+        // Already hooked: manage it instead of offering a second detour.
+        const uint64_t cave = d->cave;
+        if (ImGui::MenuItem(ICON_EDIT "  Edit detour cave", nullptr, false, cave != 0))
+        {
+            m_hex.FocusDisasm(cave);
+            m_showHex = true;
+        }
+        if (ImGui::MenuItem(ICON_FORWARD "  Show in Detours tab")) OpenDetours(a);
+        if (ImGui::MenuItem(ICON_DELETE "  Remove detour"))
+        {
+            m_detours.Remove(m_proc, a);
+            Log("Removed detour on " + m_proc.Symbolize(a));
+            if (m_showDecompile) RunDecompile();
+        }
+        return;
+    }
+    if (ImGui::BeginMenu(ICON_FLASH "  Detour this function"))
+    {
+        if (ImGui::MenuItem(ICON_ADD "  Trampoline cave (original still runs)")) InstallCaveAt(a);
+        ImGui::SetItemTooltip("Hooks this entry with a jump to a new code cave sized for it, then opens the cave\n"
+                              "in the Memory View so you can write your own code there.");
+        if (ImGui::MenuItem(ICON_FORWARD "  Redirect to another function..."))
+        {
+            OpenDetours(a);
+            m_focusDetourTarget = true;
+        }
+        ImGui::SetItemTooltip("Opens the Detours tab with this entry selected; type where it should jump to.");
+        if (ImGui::MenuItem(ICON_SETTINGS "  Open in Detours tab...")) OpenDetours(a);
+        ImGui::EndMenu();
+    }
 }
 
 int App::RecommendCaveBytes() const
@@ -2497,6 +2590,11 @@ void App::DrawDetours()
         ImGui::TextDisabled("redirect to");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(Px(200));
+        if (m_focusDetourTarget && !already)
+        {
+            ImGui::SetKeyboardFocusHere();
+            m_focusDetourTarget = false;
+        }
         ImGui::InputText("##dtarget", m_detourTarget, sizeof(m_detourTarget));
         ImGui::SetItemTooltip("Address expression, e.g. game.exe+1F00 or another function.");
         ImGui::SameLine();
@@ -2680,62 +2778,328 @@ void App::DrawDetours()
     }
 }
 
+void App::OpenOpcodes(const std::string& query)
+{
+    // Given a whole instruction ("lock cmpxchg [rcx], edx"), search for its mnemonic.
+    std::istringstream in(query);
+    std::string word, pick;
+    static const char* kPrefixes[] = { "lock", "rep", "repe", "repz", "repne", "repnz", "bnd", "notrack" };
+    while (in >> word)
+    {
+        bool prefix = false;
+        for (const char* p : kPrefixes)
+            if (word == p) prefix = true;
+        pick = word;
+        if (!prefix) break;
+    }
+    snprintf(m_opcSearch, sizeof(m_opcSearch), "%s", pick.empty() ? query.c_str() : pick.c_str());
+    m_opcCategory = 0;
+    m_opcPickBest = true;
+    m_showOpcodes = true;
+    ImGui::SetWindowFocus(kWinOpcodes);
+}
+
 void App::DrawOpcodes()
 {
-    ImGui::SetNextWindowSize(ImVec2(Px(520), Px(460)), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Opcodes", &m_showOpcodes))
+    ImGui::SetNextWindowSize(ImVec2(Px(1000), Px(640)), ImGuiCond_FirstUseEver);
+    Glass::PrepareWindow(kWinOpcodes);
+    if (!ImGui::Begin(kWinOpcodes, &m_showOpcodes))
     {
         ImGui::End();
         return;
     }
+    const auto& ref = OpcodeReference();
+    const auto& cats = OpcodeCategories();
 
-    ImGui::TextDisabled("Common x86-64 opcodes. /0../7 is the ModRM reg field (the group sub-opcode).");
-    ImGui::Separator();
-
-    struct E { const char* op; const char* what; };
-    static const E rows[] = {
-        { "88 89 8A 8B", "mov   (89 = store reg to r/m, 8B = load r/m to reg)" },
-        { "C6 /0  C7 /0", "mov r/m, imm   (C7 = the 32-bit immediate form)" },
-        { "B8..BF", "mov eax..edi, imm32   (B8=eax B9=ecx .. BF=edi)" },
-        { "00 01 02 03", "add   (01 = add reg to r/m, 03 = reg + r/m)" },
-        { "28 29 2A 2B", "sub   (NOT 02 - that is add)" },
-        { "38 39 3A 3B", "cmp" },
-        { "30 31 32 33", "xor   (31 C0 = xor eax,eax -> eax = 0)" },
-        { "20 21 .. / 08 09", "and / or" },
-        { "84 85", "test" },
-        { "83 /r  81 /r", "op r/m, imm   group: /0 add /1 or /4 and /5 sub /6 xor /7 cmp" },
-        { "FE FF /r", "group: /0 inc /1 dec /2 call /4 jmp /6 push" },
-        { "50..57 / 58..5F", "push r64 / pop r64   (50=rax .. 57=rdi)" },
-        { "8D", "lea   (compute an address)" },
-        { "E8 / E9 / EB", "call rel32 / jmp rel32 / jmp rel8" },
-        { "74 75 7C 7D 7E 7F", "je jne jl jge jle jg   (72 jb 73 jae 76 jbe 77 ja)" },
-        { "90 / C3 / CC", "nop / ret / int3 (breakpoint)" },
-        { "48", "REX.W prefix = 64-bit operand (precedes the real opcode)" },
-        { "66 / 67 / F3 F2", "operand16 / address / rep prefixes" },
-        { "0F ..", "two-byte opcodes: 0F 84 je near, 0F B6 movzx, 0F 1F nop" },
-    };
-    if (ImGui::BeginTable("##opc", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollY))
+    // Search row: text or raw bytes, plus a category filter.
+    const float catW = Px(210);
+    if (ImGui::IsWindowAppearing() || m_opcFocusSearch)
     {
-        ImGui::TableSetupColumn("bytes", ImGuiTableColumnFlags_WidthFixed, Px(150));
-        ImGui::TableSetupColumn("meaning", ImGuiTableColumnFlags_WidthStretch);
-        for (const E& e : rows)
-        {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            if (m_mono) ImGui::PushFont(m_mono);
-            ImGui::TextColored(kColAccent, "%s", e.op);
-            if (m_mono) ImGui::PopFont();
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(e.what);
-        }
-        ImGui::EndTable();
+        ImGui::SetKeyboardFocusHere();
+        m_opcFocusSearch = false;
     }
+    ImGui::SetNextItemWidth(-catW - ImGui::GetStyle().ItemSpacing.x);
+    if (ImGui::InputTextWithHint("##opcsearch", "Search: jne, flags, float, return, 0F 84, 48 8B 05 10 00 00 00 ...",
+                                 m_opcSearch, sizeof(m_opcSearch)))
+        m_opcPickBest = true;
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##opccat", m_opcCategory == 0 ? "All categories" : cats[m_opcCategory - 1].c_str()))
+    {
+        if (ImGui::Selectable("All categories", m_opcCategory == 0)) m_opcCategory = 0, m_opcPickBest = true;
+        for (size_t c = 0; c < cats.size(); c++)
+            if (ImGui::Selectable(cats[c].c_str(), m_opcCategory == (int)c + 1)) m_opcCategory = (int)c + 1, m_opcPickBest = true;
+        ImGui::EndCombo();
+    }
+
+    // Understand the query: words to match, and whether it is a run of hex bytes to decode.
+    std::string q = Lower(m_opcSearch);
+    while (!q.empty() && isspace((unsigned char)q.back())) q.pop_back();
+    while (!q.empty() && isspace((unsigned char)q.front())) q.erase(q.begin());
+    std::vector<std::string> words;
+    {
+        std::istringstream ws(q);
+        for (std::string w; ws >> w;) words.push_back(w);
+    }
+    std::string hexDigits;
+    bool hexOnly = !q.empty(), hasDigit = false;
+    for (char c : q)
+    {
+        if (isspace((unsigned char)c)) continue;
+        if (!isxdigit((unsigned char)c)) hexOnly = false;
+        if (isdigit((unsigned char)c)) hasDigit = true;
+        hexDigits += (char)toupper((unsigned char)c);
+    }
+    const bool bytesQuery = hexOnly && hasDigit && hexDigits.size() >= 2 && hexDigits.size() % 2 == 0;
+    std::vector<InstructionRow> decoded;
+    std::vector<std::string> decodedMnemonics;
+    if (bytesQuery)
+    {
+        std::vector<uint8_t> bytes;
+        for (size_t k = 0; k + 1 < hexDigits.size(); k += 2) bytes.push_back((uint8_t)strtoul(hexDigits.substr(k, 2).c_str(), nullptr, 16));
+        DisassembleBytes(bytes, 0, m_proc.IsOpen() ? m_proc.Is64() : true, decoded);
+        for (const auto& r : decoded)
+        {
+            std::istringstream ts(r.text);
+            std::string m;
+            while (ts >> m && (m == "lock" || m == "rep" || m == "repe" || m == "repne" || m == "repz" || m == "repnz")) {}
+            decodedMnemonics.push_back(m);
+        }
+    }
+
+    // Score every entry. Exact mnemonic / alias matches first, then prefixes, then text matches.
+    auto wordIn = [](const std::string& list, const std::string& w) {
+        std::istringstream ls(list);
+        for (std::string x; ls >> x;)
+            if (x == w) return true;
+        return false;
+    };
+    struct Hit { int idx; int score; };
+    std::vector<Hit> hits;
+    for (int i = 0; i < (int)ref.size(); i++)
+    {
+        const OpcodeRef& e = ref[i];
+        if (m_opcCategory > 0 && e.category != cats[m_opcCategory - 1]) continue;
+        if (q.empty())
+        {
+            hits.push_back({ i, 0 });
+            continue;
+        }
+        const std::string mn = Lower(e.mnemonic), al = Lower(e.aliases);
+        int score = 0;
+        if (bytesQuery)
+        {
+            for (const auto& m : decodedMnemonics)
+                if (m == mn || wordIn(al, m)) score = std::max(score, 1000);
+            std::string enc = e.encodings + " " + e.exampleBytes;
+            std::string compact;
+            for (char c : enc)
+                if (!isspace((unsigned char)c)) compact += (char)toupper((unsigned char)c);
+            if (compact.find(hexDigits) != std::string::npos) score = std::max(score, 300);
+        }
+        else
+        {
+            const std::string hay = mn + " " + al + " " + Lower(e.category) + " " + Lower(e.summary) + " " +
+                                    Lower(e.details) + " " + Lower(e.encodings) + " " + Lower(e.example) + " " +
+                                    Lower(e.exampleBytes) + " " + Lower(e.tip) + " " + Lower(e.flags);
+            bool all = true;
+            for (const auto& w : words)
+                if (hay.find(w) == std::string::npos) all = false;
+            if (all)
+            {
+                score = 100;
+                if (Lower(e.summary).find(q) != std::string::npos) score = 250;
+                if (mn.rfind(q, 0) == 0) score = 500;
+                if (wordIn(al, q)) score = 900;
+                if (mn == q) score = 1000;
+            }
+            // cmovge / setnz / jnae -> the family entry
+            if (!score && ((q.rfind("cmov", 0) == 0 && mn == "cmovcc") || (q.rfind("set", 0) == 0 && mn == "setcc")))
+                score = 800;
+        }
+        if (score) hits.push_back({ i, score });
+    }
+    if (!q.empty())
+        std::stable_sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.score > b.score; });
+
+    // Keep a valid selection: the best hit after the search changes.
+    bool selVisible = false;
+    for (const Hit& h : hits) selVisible |= h.idx == m_opcSelected;
+    if (!hits.empty() && (m_opcPickBest || !selVisible)) m_opcSelected = hits.front().idx;
+    m_opcPickBest = false;
+
+    // Bytes typed in: show what they decode to.
+    if (bytesQuery)
+    {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(Glass::kAccent.x, Glass::kAccent.y, Glass::kAccent.z, 0.08f));
+        ImGui::BeginChild("##opcdecode", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+        ImGui::TextDisabled("These bytes decode as (placed at address 0, so relative targets are offsets):");
+        if (m_mono) ImGui::PushFont(m_mono);
+        if (decoded.empty()) ImGui::TextColored(kColErr, "(not a valid instruction)");
+        for (const auto& r : decoded)
+        {
+            ImGui::TextDisabled("%-24s", BytesToHex(r.bytes.data(), r.bytes.size()).c_str());
+            ImGui::SameLine(0, 0);
+            Syntax::Instruction(r.text.c_str());
+        }
+        if (m_mono) ImGui::PopFont();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
+    // Up / Down walk the list even while typing in the search box.
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !hits.empty())
+    {
+        int pos = 0;
+        for (int k = 0; k < (int)hits.size(); k++)
+            if (hits[k].idx == m_opcSelected) pos = k;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) pos = std::min(pos + 1, (int)hits.size() - 1);
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) pos = std::max(pos - 1, 0);
+        m_opcSelected = hits[pos].idx;
+    }
+
+    // Left: the list. Right: the selected entry.
+    const float listW = std::max(Px(300), ImGui::GetContentRegionAvail().x * 0.36f);
+    ImGui::BeginChild("##opclist", ImVec2(listW, 0), ImGuiChildFlags_Borders);
+    if (hits.empty())
+        ImGui::TextDisabled(bytesQuery ? "No entry for these bytes." : "Nothing matches. Try fewer words.");
+    std::string lastCat;
+    const float mnW = Px(118);
+    for (const Hit& h : hits)
+    {
+        const OpcodeRef& e = ref[h.idx];
+        if (q.empty() && e.category != lastCat)
+        {
+            ImGui::SeparatorText(e.category.c_str());
+            lastCat = e.category;
+        }
+        ImGui::PushID(h.idx);
+        const bool sel = h.idx == m_opcSelected;
+        ImVec2 rowPos = ImGui::GetCursorScreenPos();
+        if (ImGui::Selectable("##row", sel, 0, ImVec2(0, ImGui::GetTextLineHeight()))) m_opcSelected = h.idx;
+        if (sel && ImGui::IsWindowAppearing()) ImGui::SetScrollHereY(0.3f);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const bool topic = e.category == "Encoding" || e.category == "Modding recipes";
+        ImVec4 mc = topic ? Glass::kAccentHi : Syntax::MnemonicColor(e.mnemonic);
+        if (m_mono && !topic) ImGui::PushFont(m_mono);
+        dl->AddText(rowPos, ImGui::ColorConvertFloat4ToU32(mc), e.mnemonic.c_str());
+        const float nameW = ImGui::CalcTextSize(e.mnemonic.c_str()).x;
+        if (m_mono && !topic) ImGui::PopFont();
+        if (!topic)
+        {
+            // Summaries line up in a column, pushed right only past an unusually long name.
+            ImVec2 sp(rowPos.x + std::max(mnW, nameW + Px(12)), rowPos.y);
+            ImVec4 clip(sp.x, sp.y, ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - Px(8), sp.y + ImGui::GetTextLineHeight());
+            dl->AddText(nullptr, 0.f, sp, ImGui::GetColorU32(ImGuiCol_TextDisabled), e.summary.c_str(), nullptr, 0.f, &clip);
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+    ImGui::BeginChild("##opcdetail", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    if (m_opcSelected >= 0 && m_opcSelected < (int)ref.size())
+    {
+        const OpcodeRef& e = ref[m_opcSelected];
+        const bool topic = e.category == "Encoding" || e.category == "Modding recipes";
+        const float wrap = ImGui::GetContentRegionAvail().x;
+
+        // Heading.
+        if (Glass::GetFonts().title) ImGui::PushFont(Glass::GetFonts().title);
+        ImGui::TextColored(topic ? Glass::kAccentHi : Syntax::MnemonicColor(e.mnemonic), "%s", e.mnemonic.c_str());
+        if (Glass::GetFonts().title) ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", e.category.c_str());
+        if (!e.aliases.empty() && !topic) // topics use aliases only as search keywords
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("- also: %s", e.aliases.c_str());
+        }
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+        if (Glass::GetFonts().bold) ImGui::PushFont(Glass::GetFonts().bold);
+        ImGui::TextUnformatted(e.summary.c_str());
+        if (Glass::GetFonts().bold) ImGui::PopFont();
+
+        if (!e.encodings.empty())
+        {
+            ImGui::SeparatorText(topic ? "Form" : "Encoding");
+            if (m_mono) ImGui::PushFont(m_mono);
+            ImGui::TextColored(Syntax::kNumber, "%s", e.encodings.c_str());
+            if (m_mono) ImGui::PopFont();
+        }
+        if (!e.details.empty())
+        {
+            ImGui::SeparatorText(topic ? "How it works" : "What it does");
+            // Multi-line details (tables, step lists) keep their layout in the mono font.
+            const bool table = e.details.find('\n') != std::string::npos;
+            size_t split = table ? e.details.find('\n') : std::string::npos;
+            ImGui::TextUnformatted(e.details.substr(0, split).c_str());
+            if (table)
+            {
+                if (m_mono) ImGui::PushFont(m_mono);
+                ImGui::TextUnformatted(e.details.substr(split + 1).c_str());
+                if (m_mono) ImGui::PopFont();
+            }
+        }
+        if (!topic)
+        {
+            ImGui::SeparatorText("Flags");
+            if (e.flags.empty()) ImGui::TextDisabled("No flags changed.");
+            else ImGui::TextColored(Syntax::kCompare, "%s", e.flags.c_str());
+        }
+        if (!e.example.empty())
+        {
+            ImGui::SeparatorText("Example");
+            if (m_mono) ImGui::PushFont(m_mono);
+            if (!e.exampleBytes.empty())
+            {
+                ImGui::TextDisabled("%-26s", e.exampleBytes.c_str());
+                ImGui::SameLine(0, 0);
+            }
+            Syntax::Instruction(e.example.c_str());
+            if (m_mono) ImGui::PopFont();
+            if (!e.exampleBytes.empty() && ImGui::SmallButton(ICON_COPY " Copy bytes"))
+                ImGui::SetClipboardText(e.exampleBytes.c_str());
+        }
+        ImGui::PopTextWrapPos();
+
+        if (!e.tip.empty())
+        {
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(Syntax::kCall.x, Syntax::kCall.y, Syntax::kCall.z, 0.08f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(Syntax::kCall.x, Syntax::kCall.y, Syntax::kCall.z, 0.35f));
+            ImGui::BeginChild("##tip", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+            ImGui::TextColored(Syntax::kCall, ICON_FLASH "  Modding tip");
+            ImGui::PushTextWrapPos(0.f);
+            ImGui::TextUnformatted(e.tip.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::EndChild();
+            ImGui::PopStyleColor(2);
+        }
+
+        // Neighbours in the same category, one click away.
+        ImGui::SeparatorText("Related");
+        int shown = 0;
+        for (int i = 0; i < (int)ref.size() && shown < 14; i++)
+        {
+            if (i == m_opcSelected || ref[i].category != e.category) continue;
+            if (shown++ && ImGui::GetContentRegionAvail().x > ImGui::CalcTextSize(ref[i].mnemonic.c_str()).x + Px(40))
+                ImGui::SameLine();
+            ImGui::PushID(i);
+            if (ImGui::SmallButton(ref[i].mnemonic.c_str())) m_opcSelected = i;
+            ImGui::PopID();
+            ImGui::SetItemTooltip("%s", ref[i].summary.c_str());
+        }
+    }
+    ImGui::EndChild();
     ImGui::End();
 }
 
 void App::DrawCalculator()
 {
     ImGui::SetNextWindowSize(ImVec2(Px(440), Px(330)), ImGuiCond_FirstUseEver);
+    Glass::PrepareWindow("Calculator");
     if (!ImGui::Begin("Calculator", &m_showCalc))
     {
         ImGui::End();
@@ -2867,6 +3231,7 @@ void App::OpenPointerScan(uint64_t target)
 void App::DrawPointerScan()
 {
     ImGui::SetNextWindowSize(ImVec2(Px(640), Px(460)), ImGuiCond_FirstUseEver);
+    Glass::PrepareWindow("Pointer scan");
     if (!ImGui::Begin("Pointer scan", &m_showPtrScan))
     {
         ImGui::End();
@@ -3155,6 +3520,7 @@ void App::OpenSigMaker(uint64_t address)
 void App::DrawAobScan()
 {
     ImGui::SetNextWindowSize(ImVec2(Px(900), Px(580)), ImGuiCond_FirstUseEver);
+    Glass::PrepareWindow(kWinAob);
     if (!ImGui::Begin(kWinAob, &m_showAob))
     {
         ImGui::End();

@@ -195,6 +195,13 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return true;
     switch (msg)
     {
+    case WM_DPICHANGED:
+    {
+        // Moved to a monitor with a different DPI: take the size Windows suggests for it.
+        const RECT* r = (const RECT*)lParam;
+        SetWindowPos(hWnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
     case WM_SIZE:
         if (wParam == SIZE_MINIMIZED) return 0;
         g_resizeWidth = (UINT)LOWORD(lParam);
@@ -396,6 +403,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     // Viewports let panels be dragged out of the main window into their own OS windows.
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_ViewportsEnable;
     io.ConfigViewportsNoTaskBarIcon = true;
+    // Resize windows whose monitor DPI changes (a panel dragged to another screen keeps its physical size).
+    io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports;
     io.IniFilename = "memory_browser.ini";
 
     ApplyTheme(dpi);
@@ -404,7 +413,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     // Oversampling keeps text crisp at fractional DPI scales.
     ImFont* uiFont = nullptr;
     ImFont* monoFont = nullptr;
-    const float uiSize = 16.f * dpi, monoSize = 15.f * dpi;
+    // Rasterise at the highest DPI of any monitor, so text stays sharp wherever a panel is dragged;
+    // Glass::InitDpi scales it back down to the main window's size.
+    float atlasDpi = dpi;
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR m, HDC, LPRECT, LPARAM p) -> BOOL {
+        float& best = *(float*)p;
+        best = std::max(best, ImGui_ImplWin32_GetDpiScaleForMonitor(m));
+        return TRUE;
+    }, (LPARAM)&atlasDpi);
+    const float uiSize = 16.f * atlasDpi, monoSize = 15.f * atlasDpi;
 
     ImFontConfig ui;
     ui.OversampleH = 3;
@@ -416,7 +433,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     if (!uiFont)
     {
         ImFontConfig cfg;
-        cfg.SizePixels = 13.f * dpi;
+        cfg.SizePixels = 13.f * atlasDpi;
         uiFont = io.Fonts->AddFontDefault(&cfg);
     }
 
@@ -470,12 +487,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     if (!monoFont)
     {
         ImFontConfig cfg;
-        cfg.SizePixels = 13.f * dpi;
+        cfg.SizePixels = 13.f * atlasDpi;
         monoFont = io.Fonts->AddFontDefault(&cfg);
     }
     // Every text face carries the icons, so a menu or label drawn while the mono font is pushed
     // (address tables, disassembly) still shows them instead of '?' boxes.
     mergeIcons(monoSize);
+
+    Glass::InitDpi(dpi, atlasDpi);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);

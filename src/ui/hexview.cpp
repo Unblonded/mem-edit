@@ -74,6 +74,7 @@ void HexView::FocusDisasm(uint64_t address)
 
 void HexView::Draw(const char* title, bool* open, Process& proc)
 {
+    Glass::PrepareWindow(title);
     if (!ImGui::Begin(title, open))
     {
         ImGui::End();
@@ -650,7 +651,9 @@ void HexView::DrawDisasm(Process& proc)
         if (ImGui::BeginPopupContextItem("##dctx"))
         {
             m_cursor = m_selAnchor = a;
+            if (onExplain && ok && ImGui::MenuItem("Explain this instruction")) onExplain(text);
             if (onDecompile && ImGui::MenuItem("Decompile this function")) onDecompile(a);
+            if (drawDetourMenu) drawDetourMenu(a);
             if (onMakeSignature && ImGui::MenuItem("Make AOB signature here")) onMakeSignature(a);
             if (onFindAccess)
             {
@@ -767,6 +770,7 @@ void HexView::DrawContextMenu(Process& proc)
         if (ImGui::MenuItem("Find out what accesses this address")) onFindAccess(a, size, TraceKind::Accesses);
     }
     if (onDecompile && ImGui::MenuItem("Decompile function here")) onDecompile(a);
+    if (drawDetourMenu) drawDetourMenu(a);
     if (onMakeSignature && ImGui::MenuItem("Make AOB signature here")) onMakeSignature(a);
     if (ImGui::BeginMenu("Fill selection"))
     {

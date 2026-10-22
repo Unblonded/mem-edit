@@ -16,6 +16,18 @@ inline const ImVec4 kAccentDeep(0.33f, 0.41f, 0.58f, 1.0f);
 // Soft radial falloff: `col` at the centre easing out to transparent at `radius`.
 void Glow(ImDrawList* dl, ImVec2 center, float radius, ImVec4 col);
 
+// Per-monitor DPI. Fonts are rasterised once at the highest DPI of any monitor (`atlasDpi`) and the
+// style is designed at the main window's DPI; call after ApplyTheme and the font setup.
+void InitDpi(float mainDpi, float atlasDpi);
+// Call right before ImGui::Begin(name). Scales style and fonts to the monitor the window was on last
+// frame, so a panel dragged to a screen with a different DPI keeps the same physical size. A window
+// floating over other panes (not docked) also gets a near-opaque background; docked panes keep the glass.
+void PrepareWindow(const char* name);
+// Back to the main window's scale, for things not tied to one window (modal popups, end of frame).
+void PrepareMain();
+// A font's pixel size at the current scale (use instead of font->FontSize).
+float FontPx(const ImFont* font);
+
 // Call once per frame before any windows are submitted.
 void DrawBackdrop();
 // Call after every window has been submitted, before ImGui::Render().

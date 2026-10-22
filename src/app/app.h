@@ -72,6 +72,10 @@ private:
     void DrawOpcodes();
     void DrawPointerScan();
     void OpenPointerScan(uint64_t target);
+    void OpenOpcodes(const std::string& query); // Opcodes window searching for `query`
+    void DrawDetourMenu(uint64_t address);   // right-click "Detour this function" items
+    void OpenDetours(uint64_t entry);        // Decompile window, Detours tab, entry selected
+    void InstallCaveAt(uint64_t entry);      // one-click trampoline with the recommended size
     void DrawAobScan();
     void DrawAobScanTab();
     void DrawSigMakerTab();
@@ -176,6 +180,8 @@ private:
     uint64_t m_caveRecForInsn = 0; // which instruction m_caveUserBytes was auto-sized for
     char m_caveImmInput[32] = "";  // new value to write into a cave's immediate instruction
     std::string m_detourStatus;
+    int m_decompileTabRequest = -1;  // select this Decompile tab on the next frame (3 = Detours)
+    bool m_focusDetourTarget = false; // put the cursor in "redirect to" when the Detours tab opens
 
     // Pointer scan
     PointerScanner m_ptrScan;
@@ -225,6 +231,11 @@ private:
     // Hex calculator
     bool m_showCalc = false;
     bool m_showOpcodes = false;
+    char m_opcSearch[128] = "";
+    int m_opcCategory = 0;        // 0 = all, otherwise index+1 into OpcodeCategories()
+    int m_opcSelected = 0;        // index into OpcodeReference()
+    bool m_opcPickBest = false;   // select the top hit after the search changes
+    bool m_opcFocusSearch = false;
     bool m_calcHex = true;
     int m_calcOp = 0;
     char m_calcA[40] = "0";

@@ -26,6 +26,8 @@ public:
     std::function<void(uint64_t)> onDecompile;
     std::function<void()> onRequestAttach; // the empty state's "Attach to process" button
     std::function<void(uint64_t)> onMakeSignature; // "Make AOB signature here"
+    std::function<void(uint64_t)> drawDetourMenu;  // draws the Detour items into the right-click menu
+    std::function<void(const std::string&)> onExplain; // "Explain this instruction" (its text)
     // Install a larger assembled instruction via a trampoline cave (returns false + a reason on
     // failure, a short status on success). Set by the host; when unset, growth overwrites in place.
     std::function<bool(uint64_t, const std::vector<uint8_t>&, std::string&)> onAssembleHook;
