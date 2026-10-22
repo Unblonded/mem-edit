@@ -1,6 +1,8 @@
 #include "hexview.h"
 
 #include "decompiler.h"
+#include "glass.h"
+#include "icons.h"
 #include "imgui.h"
 #include "ui.h"
 
@@ -78,7 +80,11 @@ void HexView::Draw(const char* title, bool* open, Process& proc)
     }
     if (!proc.IsOpen())
     {
-        ImGui::TextDisabled("Attach to a process to browse its memory  (File > Attach, Ctrl+O)");
+        if (Glass::EmptyState(ICON_CHIP, "No process attached",
+                              "Attach to a process to browse and edit its memory. You can also press Ctrl+O.",
+                              ICON_LINK "  Attach to process") &&
+            onRequestAttach)
+            onRequestAttach();
         ImGui::End();
         return;
     }

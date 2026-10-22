@@ -33,6 +33,19 @@ void Sheen(ImDrawList* dl, ImVec2 p0, ImVec2 p1, float rounding, float height, f
     }
 }
 
+// Soft outer halo around a rounded rect: concentric outlines fading out over `spread` pixels.
+void Halo(ImDrawList* dl, ImVec2 p0, ImVec2 p1, float rounding, ImVec4 col, float spread)
+{
+    const int steps = 8;
+    for (int i = 1; i <= steps; i++)
+    {
+        float t = (float)i / steps, d = spread * t;
+        float a = col.w * (1.f - t) * (1.f - t);
+        dl->AddRect(ImVec2(p0.x - d, p0.y - d), ImVec2(p1.x + d, p1.y + d), Col(col, a), rounding + d, 0,
+                    spread / steps + 0.5f);
+    }
+}
+
 void DecoratePane(ImDrawList* dl, ImVec2 p0, ImVec2 p1, float rounding, bool focused, bool drawBorder)
 {
     dl->PushClipRect(p0, p1, false);
@@ -155,5 +168,153 @@ void DecorateWindows()
                          false);
         }
     }
+}
+
+Fonts& GetFonts()
+{
+    static Fonts fonts;
+    return fonts;
+}
+
+void RamLogo(ImDrawList* dl, ImVec2 p0, float s)
+{
+    const ImVec2 p1(p0.x + s, p0.y + s);
+    const float r = s * 0.23f;
+    dl->AddRectFilled(p0, p1, IM_COL32(24, 30, 46, 255), r);
+    Sheen(dl, p0, p1, r, s * 0.5f, 0.10f);
+    dl->AddRect(p0, p1, Col(kAccentHi, 0.40f), r);
+
+    // Board.
+    const float sw = s * 0.84f, sh = s * 0.44f;
+    const ImVec2 a(IM_ROUND(p0.x + (s - sw) * 0.5f), IM_ROUND(p0.y + (s - sh) * 0.5f + s * 0.02f));
+    const ImVec2 b(a.x + IM_ROUND(sw), a.y + IM_ROUND(sh));
+    dl->AddRectFilledMultiColor(a, b, IM_COL32(205, 222, 250, 255), IM_COL32(205, 222, 250, 255),
+                                IM_COL32(120, 145, 196, 255), IM_COL32(120, 145, 196, 255));
+
+    // Chips across the top.
+    const int n = s >= 28 ? 4 : 3;
+    const float padX = (b.x - a.x) * 0.08f, gap = ImMax(1.f, (b.x - a.x) * 0.05f);
+    const float cw = ((b.x - a.x) - 2 * padX - (n - 1) * gap) / n;
+    const float cy0 = a.y + (b.y - a.y) * 0.14f, cy1 = a.y + (b.y - a.y) * 0.60f;
+    for (int i = 0; i < n; i++)
+    {
+        float x = a.x + padX + i * (cw + gap);
+        dl->AddRectFilled(ImVec2(x, cy0), ImVec2(x + cw, cy1), IM_COL32(20, 24, 36, 255), s * 0.03f);
+    }
+
+    // Contact strip with the off-centre key notch.
+    const float py0 = a.y + (b.y - a.y) * 0.72f, py1 = a.y + (b.y - a.y) * 0.92f;
+    dl->AddRectFilled(ImVec2(a.x + padX * 0.6f, py0), ImVec2(b.x - padX * 0.6f, py1), IM_COL32(236, 242, 252, 255));
+    const float nx = a.x + (b.x - a.x) * 0.40f, nw = ImMax(1.f, (b.x - a.x) * 0.06f);
+    dl->AddRectFilled(ImVec2(nx, py0 - 1), ImVec2(nx + nw, b.y), IM_COL32(24, 30, 46, 255));
+}
+
+bool AccentButton(const char* label, const ImVec2& sizeArg)
+{
+    ImGuiContext& g = *GImGui;
+    const ImGuiStyle& st = ImGui::GetStyle();
+    ImFont* bold = GetFonts().bold;
+    if (bold) ImGui::PushFont(bold);
+
+    // The fill is drawn under the button, so work out its rect and state up front.
+    ImVec2 labelSize = ImGui::CalcTextSize(label, nullptr, true);
+    ImVec2 size = ImGui::CalcItemSize(sizeArg, labelSize.x + st.FramePadding.x * 2, labelSize.y + st.FramePadding.y * 2);
+    ImVec2 p0 = ImGui::GetCursorScreenPos(), p1(p0.x + size.x, p0.y + size.y);
+    const bool disabled = (g.CurrentItemFlags & ImGuiItemFlags_Disabled) != 0;
+    const bool hovered = !disabled && ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(p0, p1);
+    const bool held = hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r = st.FrameRounding;
+    if (hovered) Halo(dl, p0, p1, r, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.30f), ImGui::GetFontSize() * 0.6f);
+    ImVec4 fill = held ? kAccentDeep : hovered ? kAccentHi : kAccent;
+    dl->AddRectFilled(p0, p1, ImGui::GetColorU32(fill), r);
+    // Glassy highlight over the upper half, and a crisp light rim.
+    Sheen(dl, p0, ImVec2(p1.x, (p0.y + p1.y) * 0.5f), r, size.y * 0.5f, held ? 0.05f : 0.22f);
+    dl->AddRect(p0, p1, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.28f)), r);
+
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Text, kInk);
+    bool pressed = ImGui::Button(label, size);
+    ImGui::PopStyleColor(5);
+    if (bold) ImGui::PopFont();
+    return pressed;
+}
+
+bool EmptyState(const char* icon, const char* title, const char* hint, const char* action)
+{
+    const Fonts& f = GetFonts();
+    ImFont* titleFont = f.title ? f.title : ImGui::GetFont();
+    ImFont* iconFont = f.iconLarge ? f.iconLarge : ImGui::GetFont();
+    const float em = ImGui::GetFontSize();
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+
+    const float badge = em * 4.6f;
+    const float wrap = ImMin(avail.x - em * 2, em * 26);
+    ImVec2 titleSize = titleFont->CalcTextSizeA(titleFont->FontSize, FLT_MAX, 0, title);
+    ImVec2 hintSize = ImGui::CalcTextSize(hint, nullptr, false, wrap);
+    float actionH = action ? ImGui::GetFrameHeight() + em * 1.2f : 0.f;
+    float total = badge + em * 1.3f + titleSize.y + em * 0.5f + hintSize.y + actionH;
+    float y = origin.y + ImMax(em, (avail.y - total) * 0.45f);
+    const float cx = origin.x + avail.x * 0.5f;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float t = (float)ImGui::GetTime();
+    ImVec2 c(cx, y + badge * 0.5f);
+    Glow(dl, c, badge * (1.15f + 0.05f * sinf(t * 1.3f)), ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.16f));
+    dl->AddCircleFilled(c, badge * 0.5f, IM_COL32(255, 255, 255, 12), 64);
+    dl->AddCircle(c, badge * 0.5f, IM_COL32(255, 255, 255, 34), 64, 1.f);
+    dl->AddCircle(c, badge * 0.5f - em * 0.45f, Col(kAccent, 0.18f), 64, 1.f);
+    ImVec2 iconSize = iconFont->CalcTextSizeA(iconFont->FontSize, FLT_MAX, 0, icon);
+    dl->AddText(iconFont, iconFont->FontSize, ImVec2(c.x - iconSize.x * 0.5f, c.y - iconSize.y * 0.5f), Col(kAccentHi, 1.f),
+                icon);
+    y += badge + em * 1.3f;
+
+    dl->AddText(titleFont, titleFont->FontSize, ImVec2(cx - titleSize.x * 0.5f, y), ImGui::GetColorU32(ImGuiCol_Text), title);
+    y += titleSize.y + em * 0.5f;
+
+    // Hint lines centred individually.
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::SetCursorScreenPos(ImVec2(cx - hintSize.x * 0.5f, y));
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+    ImGui::TextUnformatted(hint);
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+    y += hintSize.y;
+
+    bool clicked = false;
+    if (action)
+    {
+        y += em * 1.2f;
+        ImFont* bold = f.bold ? f.bold : ImGui::GetFont();
+        float w = bold->CalcTextSizeA(em, FLT_MAX, 0, action).x + ImGui::GetStyle().FramePadding.x * 4;
+        ImGui::SetCursorScreenPos(ImVec2(cx - w * 0.5f, y));
+        clicked = AccentButton(action, ImVec2(w, 0));
+    }
+    // Claim the rest of the region so the window's content size stays put.
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::Dummy(ImVec2(avail.x, ImMax(avail.y, total)));
+    return clicked;
+}
+
+Caption& GetCaption()
+{
+    static Caption caption;
+    return caption;
+}
+
+int HitTestCaption(float x, float y)
+{
+    const Caption& c = GetCaption();
+    if (x < c.barMin.x || x >= c.barMax.x || y < c.barMin.y || y >= c.barMax.y) return 0;
+    if (x >= c.maxMin.x && x < c.maxMax.x && y >= c.maxMin.y && y < c.maxMax.y) return 2;
+    if (c.blocked) return 0;
+    for (const ImVec4& r : c.solid)
+        if (x >= r.x && x < r.z && y >= r.y && y < r.w) return 0;
+    return 1;
 }
 } // namespace Glass

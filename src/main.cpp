@@ -6,6 +6,7 @@
 #include "imgui_impl_win32.h"
 
 #include "glass.h"
+#include "icons.h"
 
 #include <d3d11.h>
 #include <dcomp.h>
@@ -137,8 +138,60 @@ static void CleanupDeviceD3D()
     SafeRelease(g_device);
 }
 
+// Thickness of the invisible sizing frame; also how far a maximized window overhangs the monitor.
+static int FrameThickness(HWND hWnd)
+{
+    UINT dpi = GetDpiForWindow(hWnd);
+    return GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    // Custom caption: the client area extends to the top edge and the UI's menu bar acts as the
+    // title bar. These run before ImGui so a click on the maximize button never reaches it.
+    switch (msg)
+    {
+    case WM_NCCALCSIZE:
+        if (wParam)
+        {
+            // Keep the default side/bottom sizing frames; drop only the caption.
+            auto* p = (NCCALCSIZE_PARAMS*)lParam;
+            const LONG top = p->rgrc[0].top;
+            LRESULT r = DefWindowProcW(hWnd, msg, wParam, lParam);
+            if (r != 0) return r;
+            p->rgrc[0].top = top + (IsZoomed(hWnd) ? FrameThickness(hWnd) : 0);
+            return 0;
+        }
+        break;
+    case WM_NCHITTEST:
+    {
+        LRESULT hit = DefWindowProcW(hWnd, msg, wParam, lParam);
+        if (hit != HTCLIENT) return hit;
+        POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
+        RECT wr;
+        GetWindowRect(hWnd, &wr);
+        if (!IsZoomed(hWnd) && pt.y < wr.top + FrameThickness(hWnd) / 2)
+            return pt.x < wr.left + FrameThickness(hWnd) * 2 ? HTTOPLEFT : pt.x >= wr.right - FrameThickness(hWnd) * 2 ? HTTOPRIGHT : HTTOP;
+        switch (Glass::HitTestCaption((float)pt.x, (float)pt.y))
+        {
+        case 1: return HTCAPTION;
+        case 2: return HTMAXBUTTON; // gives the Windows 11 snap-layout flyout on hover
+        }
+        return HTCLIENT;
+    }
+    case WM_NCLBUTTONDOWN:
+    case WM_NCLBUTTONDBLCLK:
+        if (wParam == HTMAXBUTTON) return 0; // the UI draws the button; skip the classic press loop
+        break;
+    case WM_NCLBUTTONUP:
+        if (wParam == HTMAXBUTTON)
+        {
+            ShowWindow(hWnd, IsZoomed(hWnd) ? SW_RESTORE : SW_MAXIMIZE);
+            return 0;
+        }
+        break;
+    }
+
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return true;
     switch (msg)
     {
@@ -215,7 +268,7 @@ static void ApplyTheme(float scale)
     ImVec4* c = s.Colors;
     c[ImGuiCol_Text] = text;
     c[ImGuiCol_TextDisabled] = textDim;
-    c[ImGuiCol_WindowBg] = A(tint, 0.48f);
+    c[ImGuiCol_WindowBg] = A(tint, 0.70f);
     c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_PopupBg] = rgb(20, 24, 40, 0.94f);
     c[ImGuiCol_Border] = white(0.10f);
@@ -271,6 +324,10 @@ static void ApplyTheme(float scale)
     c[ImGuiCol_NavWindowingDimBg] = rgb(4, 6, 14, 0.45f);
     c[ImGuiCol_ModalWindowDimBg] = rgb(4, 6, 14, 0.45f);
 
+    // Tab close buttons appear on hover only; keeps the tab strips calm.
+    s.TabCloseButtonMinWidthSelected = 0.f;
+    s.TabCloseButtonMinWidthUnselected = 0.f;
+
     s.ScaleAllSizes(scale);
     s.HoverStationaryDelay = 0.25f;
 }
@@ -280,8 +337,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     ImGui_ImplWin32_EnableDpiAwareness();
     float dpi = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
 
-    WNDCLASSEXW wc{ sizeof(wc), CS_CLASSDC, WndProc, 0, 0, hInstance, LoadIconW(nullptr, IDI_APPLICATION),
-                    LoadCursorW(nullptr, IDC_ARROW), nullptr, nullptr, L"MemoryBrowserClass", nullptr };
+    // App icon from res/app.rc (resource 1), at the exact sizes the shell asks for.
+    HICON bigIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
+                                      GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
+    HICON smallIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                        GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    WNDCLASSEXW wc{ sizeof(wc), CS_CLASSDC, WndProc, 0, 0, hInstance, bigIcon ? bigIcon : LoadIconW(nullptr, IDI_APPLICATION),
+                    LoadCursorW(nullptr, IDC_ARROW), nullptr, nullptr, L"MemoryBrowserClass", smallIcon };
     RegisterClassExW(&wc);
     // Fit the window inside the primary monitor's work area and center it.
     RECT work{ 0, 0, 1920, 1080 };
@@ -300,6 +362,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     // Rounded window corners on Windows 11.
     DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+    // Re-run WM_NCCALCSIZE so the client area takes over the caption before the swap chain is sized.
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
     if (!CreateDeviceD3D(hwnd, wantGlass))
     {
@@ -356,6 +420,37 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
         uiFont = io.Fonts->AddFontDefault(&cfg);
     }
 
+    // Segoe Fluent Icons (Windows 11) merged into a text font, centred on the text's x-height.
+    const char* iconPath = "C:\\Windows\\Fonts\\SegoeIcons.ttf";
+    const bool haveIcons = GetFileAttributesA(iconPath) != INVALID_FILE_ATTRIBUTES;
+    static const ImWchar iconRanges[] = { ICON_MIN, ICON_MAX, 0 };
+    auto mergeIcons = [&](float size) {
+        if (!haveIcons) return;
+        ImFontConfig ic;
+        ic.MergeMode = true;
+        ic.OversampleH = 2;
+        ic.GlyphMinAdvanceX = size; // fixed-width icons line up in menus and buttons
+        ic.GlyphOffset = ImVec2(0, size * 0.18f);
+        io.Fonts->AddFontFromFileTTF(iconPath, size * 0.92f, &ic, iconRanges);
+    };
+    mergeIcons(uiSize);
+
+    // Semibold for emphasis (primary buttons, brand), and a larger cut for headings.
+    Glass::Fonts& gf = Glass::GetFonts();
+    const char* boldPath = "C:\\Windows\\Fonts\\seguisb.ttf";
+    if (GetFileAttributesA(boldPath) != INVALID_FILE_ATTRIBUTES)
+    {
+        gf.bold = io.Fonts->AddFontFromFileTTF(boldPath, uiSize, &ui);
+        mergeIcons(uiSize);
+        gf.title = io.Fonts->AddFontFromFileTTF(boldPath, uiSize * 1.3f, &ui);
+    }
+    if (haveIcons)
+    {
+        ImFontConfig big;
+        big.OversampleH = 2;
+        gf.iconLarge = io.Fonts->AddFontFromFileTTF(iconPath, uiSize * 2.4f, &big, iconRanges);
+    }
+
     ImFontConfig mono;
     mono.OversampleH = 3;
     mono.OversampleV = 2;
@@ -399,7 +494,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     app.Init(hwnd, uiFont, monoFont);
 
     // Glass: a premultiplied, partly transparent tint over the acrylic. Otherwise opaque.
-    const float glassAlpha = 0.42f;
+    const float glassAlpha = 0.66f;
     const float clearGlass[4] = { 0.035f * glassAlpha, 0.043f * glassAlpha, 0.085f * glassAlpha, glassAlpha };
     const float clearSolid[4] = { 0.035f, 0.043f, 0.085f, 1.f };
     const float* clear = g_glass ? clearGlass : clearSolid;

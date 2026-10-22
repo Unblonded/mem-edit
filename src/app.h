@@ -3,6 +3,7 @@
 #include "detour.h"
 #include "hexview.h"
 #include "patches.h"
+#include "pointerscan.h"
 #include "target.h"
 #include "scanner.h"
 #include "tracer.h"
@@ -66,6 +67,8 @@ private:
     void DrawDecompile();
     void DrawCalculator();
     void DrawOpcodes();
+    void DrawPointerScan();
+    void OpenPointerScan(uint64_t target);
     void StartDecompile(uint64_t address);
     void RunDecompile();
     void DrawDisasm();
@@ -159,6 +162,18 @@ private:
     uint64_t m_caveRecForInsn = 0; // which instruction m_caveUserBytes was auto-sized for
     char m_caveImmInput[32] = "";  // new value to write into a cave's immediate instruction
     std::string m_detourStatus;
+
+    // Pointer scan
+    PointerScanner m_ptrScan;
+    PointerScanOptions m_ptrOpts;
+    bool m_showPtrScan = false;
+    char m_ptrTarget[64] = "";
+    char m_ptrMaxOffset[16] = "800";
+    int m_ptrMaxDepth = 4;
+    bool m_ptrAllowNeg = false;
+    char m_ptrNewTarget[64] = "";   // "rescan after restart" target
+    std::string m_ptrStatus;
+    int m_ptrSel = -1;
 
     // Hex calculator
     bool m_showCalc = false;

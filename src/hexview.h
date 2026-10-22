@@ -24,6 +24,7 @@ public:
     std::function<void(const std::string&)> onLog;
     std::function<void(uint64_t, int, TraceKind)> onFindAccess;
     std::function<void(uint64_t)> onDecompile;
+    std::function<void()> onRequestAttach; // the empty state's "Attach to process" button
     // Install a larger assembled instruction via a trampoline cave (returns false + a reason on
     // failure, a short status on success). Set by the host; when unset, growth overwrites in place.
     std::function<bool(uint64_t, const std::vector<uint8_t>&, std::string&)> onAssembleHook;

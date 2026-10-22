@@ -20,4 +20,36 @@ void Glow(ImDrawList* dl, ImVec2 center, float radius, ImVec4 col);
 void DrawBackdrop();
 // Call after every window has been submitted, before ImGui::Render().
 void DecorateWindows();
+
+// Extra faces loaded next to the regular UI font. Any of them may be null (fallback: current font).
+struct Fonts
+{
+    ImFont* bold = nullptr;      // semibold UI text, icons merged
+    ImFont* title = nullptr;     // larger semibold for headings
+    ImFont* iconLarge = nullptr; // Segoe Fluent Icons alone, for empty-state art
+};
+Fonts& GetFonts();
+
+// The brand mark (same design as res/app.ico): a RAM stick on a dark glass tile, `size` square.
+void RamLogo(ImDrawList* dl, ImVec2 p0, float size);
+
+// Filled steel-blue button for a panel's primary action. Honours BeginDisabled().
+bool AccentButton(const char* label, const ImVec2& size = ImVec2(0, 0));
+
+// Centred placeholder for a panel with nothing to show: icon badge, title, hint and an
+// optional call-to-action button. Fills the remaining content region; returns true when clicked.
+bool EmptyState(const char* icon, const char* title, const char* hint, const char* action = nullptr);
+
+// The custom title bar (the main menu bar doubles as the window caption). The UI writes this
+// each frame, in screen pixels; the window procedure reads it to answer WM_NCHITTEST.
+struct Caption
+{
+    ImVec2 barMin, barMax;      // whole bar
+    ImVec2 maxMin, maxMax;      // maximize button (HTMAXBUTTON, for Windows 11 snap layouts)
+    ImVector<ImVec4> solid;     // interactive spans that must stay client area (x0, y0, x1, y1)
+    bool blocked = false;       // a popup is open or another window covers the bar: clicks go to the UI
+};
+Caption& GetCaption();
+// 0 = client, 1 = caption (drag), 2 = maximize button.
+int HitTestCaption(float x, float y);
 } // namespace Glass

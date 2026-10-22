@@ -86,6 +86,7 @@
     <ClCompile Include="src\decompiler.cpp" />
     <ClCompile Include="src\patches.cpp" />
     <ClCompile Include="src\detour.cpp" />
+    <ClCompile Include="src\pointerscan.cpp" />
     <ClCompile Include="src\glass.cpp" />
     <ClCompile Include="third_party\zydis\src\Decoder.c" />
     <ClCompile Include="third_party\zydis\src\DecoderData.c" />
@@ -137,7 +138,9 @@
     <ClInclude Include="src\decompiler.h" />
     <ClInclude Include="src\patches.h" />
     <ClInclude Include="src\detour.h" />
+    <ClInclude Include="src\pointerscan.h" />
     <ClInclude Include="src\glass.h" />
+    <ClInclude Include="src\icons.h" />
     <ClInclude Include="src\ui.h" />
     <ClInclude Include="third_party\imgui\imconfig.h" />
     <ClInclude Include="third_party\imgui\imgui.h" />
@@ -145,6 +148,12 @@
     <ClInclude Include="third_party\imgui\backends\imgui_impl_dx11.h" />
     <ClInclude Include="third_party\imgui\backends\imgui_impl_win32.h" />
     <ClInclude Include="third_party\imgui\misc\cpp\imgui_stdlib.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="res\app.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="res\app.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

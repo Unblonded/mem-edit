@@ -1,0 +1,3 @@
+// Application icon: shown in Explorer, the taskbar, Alt+Tab and the window's system menu.
+// Resource ID 1 is also what the window class loads (see main.cpp).
+1 ICON "app.ico"

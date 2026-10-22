@@ -2,6 +2,7 @@
 
 #include "decompiler.h"
 #include "glass.h"
+#include "icons.h"
 #include "imgui.h"
 #include "ui.h"
 #include "imgui_internal.h"
@@ -21,14 +22,15 @@
 
 namespace
 {
-const char* kWinScanner = "Scanner";
-const char* kWinResults = "Scan Results";
-const char* kWinHex = "Memory View";
-const char* kWinWatch = "Address List";
-const char* kWinRegions = "Memory Regions";
-const char* kWinModules = "Modules";
-const char* kWinLog = "Log";
-const char* kWinDecompile = "Decompile";
+// Icon + label; the ### part is the stable window ID used by the layout and the .ini.
+const char* kWinScanner = ICON_SEARCH "  Scanner###Scanner";
+const char* kWinResults = ICON_LIST "  Scan Results###Scan Results";
+const char* kWinHex = ICON_CHIP "  Memory View###Memory View";
+const char* kWinWatch = ICON_STAR "  Address List###Address List";
+const char* kWinRegions = ICON_GRID "  Memory Regions###Memory Regions";
+const char* kWinModules = ICON_PUZZLE "  Modules###Modules";
+const char* kWinLog = ICON_LOG "  Log###Log";
+const char* kWinDecompile = ICON_CODE "  Decompile###Decompile";
 
 // Status colours stay distinguishable but are muted to sit in the duotone palette.
 const ImVec4 kColErr(0.93f, 0.55f, 0.58f, 1.0f);
@@ -108,6 +110,7 @@ void App::Init(void* hwnd, ImFont* uiFont, ImFont* monoFont)
     m_hex.onLog = [this](const std::string& s) { Log(s); };
     m_hex.onFindAccess = [this](uint64_t a, int size, TraceKind k) { StartTrace(a, size, k); };
     m_hex.onDecompile = [this](uint64_t a) { StartDecompile(a); };
+    m_hex.onRequestAttach = [this] { m_openPicker = true; };
     m_hex.onAssembleHook = [this](uint64_t a, const std::vector<uint8_t>& bytes, std::string& status) -> bool {
         // Inside an existing trampoline's cave? Never hook a cave address. Any instruction in the
         // cave ([head stolen][free][trailing jmp/jump back]) is editable except the jump back, which
@@ -248,6 +251,18 @@ void App::Frame()
                 std::to_string(m_scanner.State().Count()) + " results in " +
                 std::to_string((int)m_scanner.LastDurationMs()) + " ms");
     }
+
+    bool ptrWasBusy = m_ptrScan.Busy();
+    m_ptrScan.Update();
+    if (ptrWasBusy && !m_ptrScan.Busy())
+    {
+        if (!m_ptrScan.LastError().empty()) Log("Pointer scan: " + m_ptrScan.LastError());
+        else
+            Log("Pointer scan: " + std::to_string(m_ptrScan.Results().size()) + " paths from " +
+                std::to_string(m_ptrScan.PointerMapSize()) + " pointers in " +
+                std::to_string((int)m_ptrScan.LastDurationMs()) + " ms");
+    }
+
     UpdateWatches();
 
     ImGuiIO& io = ImGui::GetIO();
@@ -259,13 +274,16 @@ void App::Frame()
 
     // The dockspace host stays clear so the backdrop shows between docked panes.
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    ImGuiID dock = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+    // Tabs carry their own close buttons; the per-pane X would just duplicate them.
+    ImGuiID dock = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), (ImGuiDockNodeFlags)ImGuiDockNodeFlags_NoCloseButton);
     ImGui::PopStyleColor();
     if (!m_layoutInit)
     {
         m_layoutInit = true;
         ImGuiDockNode* node = ImGui::DockBuilderGetNode(dock);
-        if (m_forceLayout || !node || !node->IsSplitNode()) SetupDefaultLayout(dock);
+        // An .ini from before the window IDs changed has no entry for them: rebuild the layout.
+        bool knownIds = ImGui::FindWindowSettingsByID(ImHashStr(kWinScanner)) != nullptr;
+        if (m_forceLayout || !node || !node->IsSplitNode() || !knownIds) SetupDefaultLayout(dock);
         m_forceLayout = false;
     }
 
@@ -280,6 +298,7 @@ void App::Frame()
     if (m_showDecompile) DrawDecompile();
     if (m_showCalc) DrawCalculator();
     if (m_showOpcodes) DrawOpcodes();
+    if (m_showPtrScan) DrawPointerScan();
     DrawTraceWindows();
     DrawProcessPicker();
     DrawEditValuePopup();
@@ -312,7 +331,31 @@ void App::SetupDefaultLayout(unsigned int id)
 
 void App::DrawMenuBar()
 {
-    if (!ImGui::BeginMainMenuBar()) return;
+    // A taller bar: it doubles as the window's title bar (see Glass::Caption and WM_NCHITTEST).
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                        ImVec2(ImGui::GetStyle().FramePadding.x, (Px(40) - ImGui::GetFontSize()) * 0.5f));
+    bool barOpen = ImGui::BeginMainMenuBar();
+    ImGui::PopStyleVar();
+    if (!barOpen) return;
+
+    ImGuiContext& g = *GImGui;
+    Glass::Caption& cap = Glass::GetCaption();
+    cap.solid.clear();
+    const ImVec2 barMin = ImGui::GetWindowPos();
+    const ImVec2 barMax(barMin.x + ImGui::GetWindowWidth(), barMin.y + ImGui::GetWindowHeight());
+    cap.barMin = barMin;
+    cap.barMax = barMax;
+    cap.blocked = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) ||
+                  (g.HoveredWindow && g.HoveredWindow != ImGui::GetCurrentWindow());
+    ImDrawList* bar = ImGui::GetWindowDrawList();
+    bar->AddLine(ImVec2(barMin.x, barMax.y - 1), ImVec2(barMax.x, barMax.y - 1), IM_COL32(255, 255, 255, 18));
+
+    // Brand mark, matching the app icon.
+    const float logo = IM_ROUND(Px(26));
+    Glass::RamLogo(bar, ImVec2(IM_ROUND(barMin.x + Px(12)), IM_ROUND(barMin.y + (barMax.y - barMin.y - logo) * 0.5f)), logo);
+    ImGui::SetCursorPosX(Px(12) + logo + Px(8));
+    const float menusX0 = ImGui::GetCursorScreenPos().x;
+
     if (ImGui::BeginMenu("File"))
     {
         if (ImGui::MenuItem("Attach to process...", "Ctrl+O")) m_openPicker = true;
@@ -364,17 +407,53 @@ void App::DrawMenuBar()
     }
     if (ImGui::MenuItem("Calculator")) m_showCalc = true;
     if (ImGui::MenuItem("Opcodes")) m_showOpcodes = true;
+    if (ImGui::MenuItem("Pointer scan")) m_showPtrScan = true;
     if (ImGui::BeginMenu("Help"))
     {
         ImGui::MenuItem("Expressions & shortcuts", nullptr, &m_showAbout);
         ImGui::EndMenu();
     }
+    cap.solid.push_back(ImVec4(menusX0, barMin.y, ImGui::GetItemRectMax().x, barMax.y));
 
-    // Quick attach pill on the right of the menu bar, with a status light that pulses while attached.
+    // Window buttons, flush right like the system ones. Maximize is answered by the window
+    // procedure (HTMAXBUTTON) so Windows 11 can show snap layouts; the UI only draws it.
+    HWND hwnd = (HWND)m_hwnd;
+    const float capW = Px(46);
+    const float capX = barMax.x - capW * 3;
+    auto captionButton = [&](int i, const char* icon, const char* id, bool danger) {
+        ImVec2 b0(capX + capW * i, barMin.y), b1(b0.x + capW, barMax.y);
+        bool pressed = false, hovered, held = false;
+        if (id)
+        {
+            ImGui::SetCursorScreenPos(b0);
+            pressed = ImGui::InvisibleButton(id, ImVec2(capW, b1.y - b0.y));
+            hovered = ImGui::IsItemHovered();
+            held = ImGui::IsItemActive();
+            cap.solid.push_back(ImVec4(b0.x, b0.y, b1.x, b1.y));
+        }
+        else
+        {
+            hovered = !cap.blocked && ImGui::IsMouseHoveringRect(b0, b1, false);
+            cap.maxMin = b0;
+            cap.maxMax = b1;
+        }
+        if (hovered)
+            bar->AddRectFilled(b0, b1, danger ? IM_COL32(196, 43, 28, held ? 190 : 230) : IM_COL32(255, 255, 255, held ? 14 : 24));
+        ImVec2 ts = ImGui::CalcTextSize(icon);
+        bar->AddText(ImVec2(b0.x + (capW - ts.x) * 0.5f, b0.y + (b1.y - b0.y - ts.y) * 0.5f),
+                     ImGui::GetColorU32(ImGuiCol_Text, hovered ? 1.f : 0.8f), icon);
+        return pressed;
+    };
+    if (captionButton(0, ICON_WIN_MIN, "##capmin", false)) ShowWindow(hwnd, SW_MINIMIZE);
+    captionButton(1, IsZoomed(hwnd) ? ICON_WIN_RESTORE : ICON_WIN_MAX, nullptr, false);
+    if (captionButton(2, ICON_WIN_CLOSE, "##capclose", true)) m_quit = true;
+
+    // Quick attach pill left of the window buttons, with a status light that pulses while attached.
     const char* label = m_proc.IsOpen() ? m_proc.Name().c_str() : "No process";
     const float dotGap = Px(22);
     float w = ImGui::CalcTextSize(label).x + dotGap + Px(44);
-    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - w);
+    ImGui::SetCursorScreenPos(ImVec2(capX - w + Px(4), barMin.y));
+    ImGui::AlignTextToFramePadding();
     ImVec2 pill0 = ImGui::GetCursorScreenPos();
     ImVec2 pillSize(w - Px(16), ImGui::GetFrameHeight() - Px(4));
     pill0.y = ImGui::GetWindowPos().y + (ImGui::GetWindowHeight() - pillSize.y) * 0.5f;
@@ -400,6 +479,7 @@ void App::DrawMenuBar()
     bool pillHovered = ImGui::IsItemHovered();
     ImGui::PopStyleColor(3);
     if (pillHovered) dl->AddRect(pill0, pill1, ImGui::GetColorU32(ImGuiCol_SliderGrab), pillSize.y * 0.5f, 0, 1.5f);
+    cap.solid.push_back(ImVec4(pill0.x, pill0.y, pill1.x, pill1.y));
     ImGui::SetItemTooltip("Click to choose a process (Ctrl+O)");
     ImGui::EndMainMenuBar();
 }
@@ -412,26 +492,56 @@ void App::DrawStatusBar()
     {
         if (ImGui::BeginMenuBar())
         {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 wp = ImGui::GetWindowPos();
+            dl->AddLine(wp, ImVec2(wp.x + ImGui::GetWindowWidth(), wp.y), IM_COL32(255, 255, 255, 18));
+            const float midY = wp.y + ImGui::GetWindowHeight() * 0.5f;
+
+            // Connection light, then process facts.
+            ImVec4 dotCol = m_proc.IsOpen() ? kColOk : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+            ImVec2 dot(ImGui::GetCursorScreenPos().x + Px(5), midY);
+            if (m_proc.IsOpen()) Glass::Glow(dl, dot, Px(9), ImVec4(dotCol.x, dotCol.y, dotCol.z, 0.35f));
+            dl->AddCircleFilled(dot, Px(3.5f), ImGui::ColorConvertFloat4ToU32(dotCol));
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + Px(16));
             if (m_proc.IsOpen())
             {
-                ImGui::TextColored(kColOk, "%s", m_proc.Name().c_str());
-                ImGui::TextDisabled("PID %lu  %s", m_proc.Pid(), m_proc.Is64() ? "x64" : "x86");
-                if (m_proc.IsSuspended()) ImGui::TextColored(kColChanged, "SUSPENDED");
+                ImGui::TextUnformatted(m_proc.Name().c_str());
+                ImGui::TextDisabled("PID %lu", m_proc.Pid());
+                ImGui::TextDisabled(ICON_CHIP " %s", m_proc.Is64() ? "x64" : "x86");
+                if (m_proc.IsSuspended()) ImGui::TextColored(kColChanged, ICON_PAUSE " Suspended");
             }
-            else
+            else ImGui::TextDisabled("Not attached");
+
+            // Scan state: a slim progress track while scanning.
+            if (m_scanner.Busy())
             {
-                ImGui::TextDisabled("Not attached");
+                ImGui::Separator();
+                ImGui::TextColored(kColAccent, ICON_SEARCH " Scanning");
+                ImVec2 t0(ImGui::GetCursorScreenPos().x, midY - Px(2)), t1(t0.x + Px(120), midY + Px(2));
+                dl->AddRectFilled(t0, t1, IM_COL32(255, 255, 255, 22), Px(2));
+                dl->AddRectFilled(t0, ImVec2(t0.x + (t1.x - t0.x) * m_scanner.Progress(), t1.y),
+                                  ImGui::GetColorU32(Glass::kAccent), Px(2));
+                ImGui::Dummy(ImVec2(Px(120), 0));
+                ImGui::TextDisabled("%.0f%%", m_scanner.Progress() * 100.f);
             }
-            ImGui::Separator();
-            if (m_scanner.Busy()) ImGui::Text("Scanning... %.0f%%", m_scanner.Progress() * 100.f);
             else if (m_scanner.HasResults())
-                ImGui::TextDisabled("Scan #%llu: %zu results", (unsigned long long)m_scanner.State().scanNumber,
+            {
+                ImGui::Separator();
+                ImGui::TextDisabled(ICON_LIST " Scan #%llu: %zu results", (unsigned long long)m_scanner.State().scanNumber,
                                     m_scanner.State().Count());
+            }
+
+            // Right side: privilege and frame rate.
+            char fps[32];
+            snprintf(fps, sizeof(fps), "%.0f FPS", ImGui::GetIO().Framerate);
+            const char* priv = m_elevated ? ICON_SHIELD_FILL " Administrator" : ICON_SHIELD " Not elevated";
+            const ImGuiStyle& st = ImGui::GetStyle();
+            float rightW = ImGui::CalcTextSize(priv).x + ImGui::CalcTextSize(fps).x + st.ItemSpacing.x * 4 + Px(8);
+            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - rightW));
+            if (m_elevated) ImGui::TextColored(kColOk, "%s", priv);
+            else ImGui::TextDisabled("%s", priv);
             ImGui::Separator();
-            if (m_elevated) ImGui::TextColored(kColOk, "Administrator");
-            else ImGui::TextDisabled("Not elevated");
-            ImGui::Separator();
-            ImGui::TextDisabled("%.0f FPS", ImGui::GetIO().Framerate);
+            ImGui::TextDisabled("%s", fps);
             ImGui::EndMenuBar();
         }
     }
@@ -550,11 +660,12 @@ void App::DrawScanner()
 
     bool doFirst = false, doNext = false;
     float bw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.f;
+    // The step you'd take next gets the filled accent button.
     if (!hasResults)
     {
-        if (ImGui::Button("First Scan", ImVec2(bw, 0))) doFirst = true;
+        if (Glass::AccentButton(ICON_SEARCH "  First Scan", ImVec2(bw, 0))) doFirst = true;
     }
-    else if (ImGui::Button("New Scan", ImVec2(bw, 0)))
+    else if (ImGui::Button(ICON_REFRESH "  New Scan", ImVec2(bw, 0)))
     {
         m_scanner.Reset();
         m_resSelA = m_resSelB = -1;
@@ -563,10 +674,12 @@ void App::DrawScanner()
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(!hasResults);
-    if (ImGui::Button("Next Scan", ImVec2(bw, 0))) doNext = true;
+    if (hasResults ? Glass::AccentButton(ICON_FORWARD "  Next Scan", ImVec2(bw, 0))
+                   : ImGui::Button(ICON_FORWARD "  Next Scan", ImVec2(bw, 0)))
+        doNext = true;
     ImGui::SameLine();
     ImGui::BeginDisabled(!m_scanner.CanUndo());
-    if (ImGui::Button("Undo Scan", ImVec2(bw, 0))) { m_scanner.Undo(); m_resSelA = m_resSelB = -1; }
+    if (ImGui::Button(ICON_UNDO "  Undo Scan", ImVec2(bw, 0))) { m_scanner.Undo(); m_resSelA = m_resSelB = -1; }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
 
@@ -752,13 +865,21 @@ void App::DrawResults()
     const ScanState& st = m_scanner.State();
     if (m_scanner.Busy())
     {
-        ImGui::TextDisabled("Scan in progress...");
+        char hint[64];
+        snprintf(hint, sizeof(hint), "%.0f%% done. Results appear here when it finishes.", m_scanner.Progress() * 100.f);
+        Glass::EmptyState(ICON_SEARCH, "Scanning", hint);
         ImGui::End();
         return;
     }
     if (!st.valid)
     {
-        ImGui::TextDisabled("No scan results yet.");
+        if (!m_proc.IsOpen())
+        {
+            if (Glass::EmptyState(ICON_LIST, "No results yet", "Attach to a process, then run a First Scan.",
+                                  ICON_LINK "  Attach to process"))
+                m_openPicker = true;
+        }
+        else Glass::EmptyState(ICON_LIST, "No results yet", "Run a First Scan in the Scanner to find addresses.");
         ImGui::End();
         return;
     }
@@ -824,6 +945,7 @@ void App::DrawResults()
                         for (int64_t k = a0; k <= a1 && k < a0 + 5000; k++) AddWatch(st.addresses[k], st.type, (int)vs);
                     }
                     if (ImGui::MenuItem("Browse memory here")) { m_hex.GoTo(a); m_showHex = true; ImGui::SetWindowFocus(kWinHex); }
+                    if (ImGui::MenuItem("Pointer scan for this address")) OpenPointerScan(a);
                     if (ImGui::MenuItem("Change value of selected..."))
                     {
                         m_editWatch = -2;
@@ -1068,6 +1190,8 @@ void App::DrawAddressList()
                     StartTrace(w.address, (int)std::min<size_t>(sz, 8), TraceKind::Accesses);
                 if (ImGui::MenuItem("Decompile function here", nullptr, false, w.resolved))
                     StartDecompile(w.address);
+                if (ImGui::MenuItem("Pointer scan for this address", nullptr, false, w.resolved))
+                    OpenPointerScan(w.address);
                 ImGui::Separator();
                 if (ImGui::MenuItem("Copy address", nullptr, false, w.resolved)) ImGui::SetClipboardText(ToHex(w.address).c_str());
                 if (ImGui::MenuItem("Copy value")) ImGui::SetClipboardText(val.c_str());
@@ -1106,7 +1230,9 @@ void App::DrawRegions()
     }
     if (!m_proc.IsOpen())
     {
-        ImGui::TextDisabled("Not attached.");
+        if (Glass::EmptyState(ICON_GRID, "No process", "Attach to a process to list its memory regions.",
+                              ICON_LINK "  Attach to process"))
+            m_openPicker = true;
         ImGui::End();
         return;
     }
@@ -1223,7 +1349,9 @@ void App::DrawModules()
     }
     if (!m_proc.IsOpen())
     {
-        ImGui::TextDisabled("Not attached.");
+        if (Glass::EmptyState(ICON_PUZZLE, "No process", "Attach to a process to list its loaded modules.",
+                              ICON_LINK "  Attach to process"))
+            m_openPicker = true;
         ImGui::End();
         return;
     }
@@ -2333,6 +2461,163 @@ void App::DrawCalculator()
     row("bytes LE", bytesLE);
     row("binary", bin);
     if (m_mono) ImGui::PopFont();
+
+    ImGui::End();
+}
+
+void App::OpenPointerScan(uint64_t target)
+{
+    m_showPtrScan = true;
+    snprintf(m_ptrTarget, sizeof(m_ptrTarget), "%llX", (unsigned long long)target);
+    m_ptrOpts.target = target;
+    ImGui::SetWindowFocus("Pointer scan");
+}
+
+void App::DrawPointerScan()
+{
+    ImGui::SetNextWindowSize(ImVec2(Px(640), Px(460)), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Pointer scan", &m_showPtrScan))
+    {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextDisabled("Finds static pointer paths (module+offset -> ... -> address) that survive a restart.");
+    ImGui::Spacing();
+
+    ImGui::SetNextItemWidth(Px(200));
+    ImGui::InputText("target", m_ptrTarget, sizeof(m_ptrTarget));
+    ImGui::SameLine();
+    ImGui::TextDisabled("hex, or an expression");
+
+    ImGui::SetNextItemWidth(Px(120));
+    ImGui::SliderInt("max depth", &m_ptrMaxDepth, 1, 7);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(Px(100));
+    ImGui::InputText("max offset", m_ptrMaxOffset, sizeof(m_ptrMaxOffset));
+    ImGui::SameLine();
+    ImGui::Checkbox("negative offsets", &m_ptrAllowNeg);
+
+    const bool busy = m_ptrScan.Busy();
+    ImGui::BeginDisabled(busy || !m_proc.IsOpen());
+    if (ImGui::Button("Scan"))
+    {
+        uint64_t target = 0;
+        std::string err;
+        uint64_t maxOff = 0x800;
+        ParseHexU64(m_ptrMaxOffset, maxOff);
+        if (!EvaluateAddress(m_proc, m_ptrTarget, target, &err))
+            m_ptrStatus = "Bad target: " + err;
+        else
+        {
+            m_ptrOpts.target = target;
+            m_ptrOpts.maxDepth = m_ptrMaxDepth;
+            m_ptrOpts.maxOffset = maxOff ? maxOff : 0x800;
+            m_ptrOpts.allowNegative = m_ptrAllowNeg;
+            m_ptrOpts.staticOnly = true;
+            if (!m_ptrScan.Start(m_proc, m_ptrOpts, err)) m_ptrStatus = err;
+            else m_ptrStatus = "Scanning...";
+        }
+    }
+    ImGui::EndDisabled();
+    if (busy)
+    {
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) m_ptrScan.Cancel();
+        ImGui::SameLine();
+        ImGui::ProgressBar(m_ptrScan.Progress(), ImVec2(Px(160), 0), m_ptrScan.Phase());
+    }
+
+    if (!m_ptrStatus.empty())
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", m_ptrStatus.c_str());
+    }
+
+    const auto& results = m_ptrScan.Results();
+    ImGui::Separator();
+    ImGui::TextColored(kColAccent, "%zu paths", results.size());
+    ImGui::SameLine();
+    ImGui::TextDisabled("from %llu pointers", (unsigned long long)m_ptrScan.PointerMapSize());
+
+    // Rescan after a restart: keep only paths that still resolve to a (new) target.
+    ImGui::SameLine(0, Px(20));
+    ImGui::SetNextItemWidth(Px(150));
+    ImGui::InputText("new target", m_ptrNewTarget, sizeof(m_ptrNewTarget));
+    ImGui::SameLine();
+    ImGui::BeginDisabled(results.empty() || !m_proc.IsOpen());
+    if (ImGui::Button("Filter to still-valid"))
+    {
+        uint64_t nt = 0;
+        std::string err;
+        if (!EvaluateAddress(m_proc, m_ptrNewTarget, nt, &err)) m_ptrStatus = "Bad new target: " + err;
+        else
+        {
+            size_t left = m_ptrScan.Filter(m_proc, nt);
+            m_ptrStatus = std::to_string(left) + " paths still resolve to the new target";
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("After the game restarts, attach again, find the value's new address, type it here,\n"
+                          "and keep only the paths that still reach it.");
+
+    if (ImGui::BeginTable("##ptrres", 3,
+                          ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_BordersInnerV))
+    {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, Px(180));
+        ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Resolves to", ImGuiTableColumnFlags_WidthFixed, Px(130));
+        ImGui::TableHeadersRow();
+
+        if (m_mono) ImGui::PushFont(m_mono);
+        ImGuiListClipper clip;
+        clip.Begin((int)results.size());
+        while (clip.Step())
+        {
+            for (int i = clip.DisplayStart; i < clip.DisplayEnd; i++)
+            {
+                const PointerChain& ch = results[i];
+                ImGui::TableNextRow();
+                ImGui::PushID(i);
+
+                ImGui::TableNextColumn();
+                std::string baseText = ch.staticBase ? (ch.module + "+" + ToHex(ch.baseOffset)) : ToHex(ch.base);
+                if (ch.staticBase) ImGui::PushStyleColor(ImGuiCol_Text, kColOk);
+                bool sel = (m_ptrSel == i);
+                if (ImGui::Selectable(baseText.c_str(), sel, ImGuiSelectableFlags_SpanAllColumns)) m_ptrSel = i;
+                if (ch.staticBase) ImGui::PopStyleColor();
+
+                std::string expr = ch.Expression();
+                if (ImGui::BeginPopupContextItem("##pctx"))
+                {
+                    m_ptrSel = i;
+                    if (ImGui::MenuItem("Add to address list"))
+                    {
+                        WatchEntry e;
+                        e.expression = expr;
+                        e.type = ValueType::Int32;
+                        e.description = "Pointer";
+                        m_watches.push_back(std::move(e));
+                    }
+                    if (ImGui::MenuItem("Copy path")) ImGui::SetClipboardText(expr.c_str());
+                    if (ImGui::MenuItem("Browse memory here")) { m_hex.GoTo(ch.resolved); m_showHex = true; }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(expr.c_str());
+
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(ToHex(ch.resolved).c_str());
+
+                ImGui::PopID();
+            }
+        }
+        if (m_mono) ImGui::PopFont();
+        ImGui::EndTable();
+    }
 
     ImGui::End();
 }
