@@ -36,6 +36,11 @@ float DrawInstruction(ImDrawList* dl, ImVec2 pos, const char* text, float alpha 
 // An address expression or pointer path: ["game.exe"+1F0]+18
 void Expression(const char* text);
 
+// Draws C++ source into a draw list, coloured by token (keywords, types, strings, comments,
+// numbers, preprocessor), handling newlines and /* */ blocks. Uses the current font for metrics,
+// so push a monospace font first. Returns the drawn content size (width, height) from `origin`.
+ImVec2 DrawCppCode(ImDrawList* dl, ImVec2 origin, const char* text, float alpha = 1.f);
+
 // Value types: integers sky, floats teal, strings amber, byte arrays orchid.
 ImVec4 TypeColor(ValueType t);
 

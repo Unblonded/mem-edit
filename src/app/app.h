@@ -200,6 +200,9 @@ private:
     std::string m_cppLog;             // build + run output
     char m_cppRunArgs[512] = "";      // params passed to OnRun
     bool m_cppInit = false;           // seeded the editor with the starter template yet?
+    bool m_cppHighlight = true;       // colour the editor
+    std::string CppStarter() const;                   // the blank OnCall/OnRun template
+    std::string CppTemplateFor(uint64_t entry) const; // starter + the original function decompiled
 
     // Pointer scan
     PointerScanner m_ptrScan;

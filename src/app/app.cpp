@@ -2576,33 +2576,76 @@ void App::OpenCppHooks(uint64_t entry)
     if (entry) snprintf(m_cppEntry, sizeof(m_cppEntry), "%llX", (unsigned long long)entry);
 }
 
+std::string App::CppStarter() const
+{
+    return
+        "#include \"memhook.h\"\n"
+        "using namespace memhook;\n"
+        "\n"
+        "// Runs on EVERY call to the hooked function, inside the target. rcx/rdx/r8/r9 are the\n"
+        "// first four integer/pointer arguments (Windows x64 calling convention).\n"
+        "void OnCall(Regs* r)\n"
+        "{\n"
+        "    Print(\"called: arg1=%llu arg2=%llu\\n\", r->rcx, r->rdx);\n"
+        "    // r->rcx = 999;          // change an argument before the original runs\n"
+        "    // r->skipOriginal = 1;   // or stop the original from running at all\n"
+        "}\n"
+        "\n"
+        "// Runs when you press Run, with the Params box passed as `args`.\n"
+        "void OnRun(const char* args)\n"
+        "{\n"
+        "    Print(\"Run with: %s\\n\", args);\n"
+        "    // Call the real function yourself with custom parameters:\n"
+        "    // auto fn = Fn<long long(long long, long long)>(Original);\n"
+        "    // Print(\"result = %lld\\n\", fn(2, 3));\n"
+        "}\n";
+}
+
+std::string App::CppTemplateFor(uint64_t entry) const
+{
+    std::string sym = m_proc.Symbolize(entry);
+    std::string decomp, err;
+    bool ok = entry && DecompileFunction(m_proc, entry, decomp, err);
+
+    std::string ref = "// ---- Original function at " + sym + " (decompiled, for reference) ----\n";
+    if (ok)
+    {
+        // Comment out every line of the pseudo-C so it sits in the file as a guide.
+        size_t start = 0;
+        while (start < decomp.size())
+        {
+            size_t nl = decomp.find('\n', start);
+            std::string line = decomp.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+            while (!line.empty() && (line.back() == '\r')) line.pop_back();
+            ref += "//   " + line + "\n";
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+    }
+    else
+    {
+        ref += "//   (could not decompile: " + (err.empty() ? std::string("unknown") : err) + ")\n";
+    }
+    ref += "// ------------------------------------------------------------------\n\n";
+
+    return "#include \"memhook.h\"\n"
+           "using namespace memhook;\n\n" +
+           ref +
+           "// rcx/rdx/r8/r9 = first four integer/pointer arguments (Windows x64).\n"
+           "void OnCall(Regs* r)\n"
+           "{\n"
+           "    // Reproduce or tweak the behaviour above. Edit r->rcx etc., or:\n"
+           "    // auto orig = Fn<long long(long long, long long)>(Original);\n"
+           "    // r->skipOriginal = 1;   // replace the original entirely\n"
+           "}\n\n"
+           "void OnRun(const char* args)\n"
+           "{\n"
+           "}\n";
+}
+
 void App::DrawCppHooks()
 {
-    if (!m_cppInit)
-    {
-        m_cppSource =
-            "#include \"memhook.h\"\n"
-            "using namespace memhook;\n"
-            "\n"
-            "// Runs on EVERY call to the hooked function, inside the target. rcx/rdx/r8/r9 are the\n"
-            "// first four integer/pointer arguments (Windows x64 calling convention).\n"
-            "void OnCall(Regs* r)\n"
-            "{\n"
-            "    Print(\"called: arg1=%llu arg2=%llu\\n\", r->rcx, r->rdx);\n"
-            "    // r->rcx = 999;          // change an argument before the original runs\n"
-            "    // r->skipOriginal = 1;   // or stop the original from running at all\n"
-            "}\n"
-            "\n"
-            "// Runs when you press Run, with the Params box passed as `args`.\n"
-            "void OnRun(const char* args)\n"
-            "{\n"
-            "    Print(\"Run with: %s\\n\", args);\n"
-            "    // Call the real function yourself with custom parameters:\n"
-            "    // auto fn = Fn<long long(long long, long long)>(Original);\n"
-            "    // Print(\"result = %lld\\n\", fn(2, 3));\n"
-            "}\n";
-        m_cppInit = true;
-    }
+    if (!m_cppInit) { m_cppSource = CppStarter(); m_cppInit = true; }
 
     Glass::PrepareWindow(kWinCppHook);
     ImGui::SetNextWindowSize(ImVec2(680, 620), ImGuiCond_FirstUseEver);
@@ -2642,6 +2685,9 @@ void App::DrawCppHooks()
                 m_cppHookedEntry = entry;
                 m_cpp.Attach(m_proc, err);
                 m_cpp.SetTrampoline(tramp);
+                // Seed the editor with the original function (decompiled) unless you've edited it.
+                if (m_cppSource.empty() || m_cppSource == CppStarter())
+                    m_cppSource = CppTemplateFor(entry);
                 m_cppLog = "Hooked " + m_proc.Symbolize(entry) + " (passthrough). Compile & Apply to run your code.";
                 Log("C++ hook installed on " + m_proc.Symbolize(entry));
             }
@@ -2664,14 +2710,45 @@ void App::DrawCppHooks()
     else
         ImGui::TextDisabled("Not hooked - you can still write OnRun and press Run without hooking.");
 
+    // Pull the original function in as a starting point, and toggle colouring.
+    if (ImGui::Button(ICON_CODE "  Load original as template") && (haveEntry || hooked))
+        m_cppSource = CppTemplateFor(hooked ? m_cppHookedEntry : entry);
+    ImGui::SetItemTooltip("Replaces the editor with the hooked function decompiled to pseudo-C,\n"
+                          "so you can rebuild or tweak its behaviour in your hook.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Syntax highlight", &m_cppHighlight);
+
     ImGui::Separator();
 
     // --- Code editor ---
     float footer = ImGui::GetFrameHeightWithSpacing() * 2 + 150;
+    float editH = ImGui::GetContentRegionAvail().y - footer;
+    if (editH < 80) editH = 80;
     if (m_mono) ImGui::PushFont(m_mono);
-    ImGui::InputTextMultiline("##cppsrc", &m_cppSource,
-                              ImVec2(-FLT_MIN, ImGui::GetContentRegionAvail().y - footer),
-                              ImGuiInputTextFlags_AllowTabInput);
+    if (m_cppHighlight && m_mono)
+    {
+        // Colour the code by drawing it under a transparent, content-sized InputTextMultiline. Both
+        // live in one scrolling child, so they move together; editing happens in the (invisible) input.
+        ImGui::BeginChild("##cppeditor", ImVec2(-FLT_MIN, editH), true, ImGuiWindowFlags_HorizontalScrollbar);
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        ImVec2 content = Syntax::DrawCppCode(ImGui::GetWindowDrawList(), origin, m_cppSource.c_str());
+        float w = content.x + 40 > ImGui::GetContentRegionAvail().x ? content.x + 40 : ImGui::GetContentRegionAvail().x;
+        float h = content.y > ImGui::GetContentRegionAvail().y ? content.y : ImGui::GetContentRegionAvail().y;
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));          // typed glyphs invisible
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        ImGui::SetCursorScreenPos(origin);
+        ImGui::InputTextMultiline("##cppsrc", &m_cppSource, ImVec2(w, h), ImGuiInputTextFlags_AllowTabInput);
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+        ImGui::EndChild();
+    }
+    else
+    {
+        ImGui::InputTextMultiline("##cppsrc", &m_cppSource, ImVec2(-FLT_MIN, editH),
+                                  ImGuiInputTextFlags_AllowTabInput);
+    }
     if (m_mono) ImGui::PopFont();
 
     // --- Actions ---

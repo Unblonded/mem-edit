@@ -2,6 +2,8 @@
 
 #include <cctype>
 #include <cstring>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace Syntax
@@ -254,5 +256,106 @@ void LogLine(const std::string& line)
     ImGui::PushStyleColor(ImGuiCol_Text, col);
     ImGui::TextUnformatted(line.c_str() + msg, line.c_str() + line.size());
     ImGui::PopStyleColor();
+}
+
+namespace
+{
+// C++ token colours (reuse the shared palette so the editor matches the rest of the app).
+const ImVec4 kCppKeyword = kCompare;                 // violet
+const ImVec4 kCppType = kMove;                       // sky
+const ImVec4 kCppString = kCall;                     // amber
+const ImVec4 kCppNumber = kNumber;                   // green
+const ImVec4 kCppComment = kDim;                     // dim grey
+const ImVec4 kCppPreproc = kSimd;                    // orchid
+const ImVec4 kCppPunct = kPunct;
+
+bool IsKeyword(const std::string& w)
+{
+    static const std::unordered_set<std::string> k = {
+        "alignas","alignof","and","asm","auto","break","case","catch","class","const","consteval",
+        "constexpr","constinit","const_cast","continue","decltype","default","delete","do","dynamic_cast",
+        "else","enum","explicit","export","extern","false","for","friend","goto","if","inline","mutable",
+        "namespace","new","noexcept","not","nullptr","operator","or","private","protected","public",
+        "register","reinterpret_cast","return","sizeof","static","static_assert","static_cast","struct",
+        "switch","template","this","thread_local","throw","true","try","typedef","typaname","typename",
+        "union","using","virtual","volatile","while","__try","__except","__declspec","__forceinline"
+    };
+    return k.count(w) != 0;
+}
+bool IsType(const std::string& w)
+{
+    static const std::unordered_set<std::string> t = {
+        "void","bool","char","short","int","long","float","double","signed","unsigned","wchar_t","size_t",
+        "int8_t","int16_t","int32_t","int64_t","uint8_t","uint16_t","uint32_t","uint64_t","intptr_t","uintptr_t",
+        "DWORD","WORD","BYTE","QWORD","HANDLE","HMODULE","LPVOID","BOOL","UINT","ULONG","Regs","std"
+    };
+    return t.count(w) != 0;
+}
+} // namespace
+
+ImVec2 DrawCppCode(ImDrawList* dl, ImVec2 origin, const char* s, float alpha)
+{
+    const float lineH = ImGui::GetTextLineHeight();
+    const ImVec4 textCol = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    ImVec2 pos = origin;
+    float maxX = origin.x;
+
+    auto draw = [&](const char* b, const char* e, const ImVec4& c) {
+        if (e <= b) return;
+        ImVec4 cc(c.x, c.y, c.z, c.w * alpha);
+        dl->AddText(pos, ImGui::GetColorU32(cc), b, e);
+        pos.x += ImGui::CalcTextSize(b, e).x;
+        if (pos.x > maxX) maxX = pos.x;
+    };
+
+    bool block = false;
+    const char* p = s;
+    while (*p)
+    {
+        if (*p == '\n') { pos.x = origin.x; pos.y += lineH; p++; continue; }
+        if (block)
+        {
+            const char* b = p;
+            while (*p && *p != '\n') { if (p[0] == '*' && p[1] == '/') { p += 2; block = false; break; } p++; }
+            draw(b, p, kCppComment);
+            continue;
+        }
+        if (*p == ' ' || *p == '\t') { const char* b = p; while (*p == ' ' || *p == '\t') p++; draw(b, p, textCol); continue; }
+        if (p[0] == '/' && p[1] == '/') { const char* b = p; while (*p && *p != '\n') p++; draw(b, p, kCppComment); continue; }
+        if (p[0] == '/' && p[1] == '*')
+        {
+            const char* b = p; p += 2; block = true;
+            while (*p && *p != '\n') { if (p[0] == '*' && p[1] == '/') { p += 2; block = false; break; } p++; }
+            draw(b, p, kCppComment);
+            continue;
+        }
+        if (*p == '"' || *p == '\'')
+        {
+            char q = *p; const char* b = p; p++;
+            while (*p && *p != '\n') { if (*p == '\\' && p[1]) { p += 2; continue; } if (*p == q) { p++; break; } p++; }
+            draw(b, p, kCppString);
+            continue;
+        }
+        if (*p == '#') { const char* b = p; p++; while (isalpha((unsigned char)*p)) p++; draw(b, p, kCppPreproc); continue; }
+        if (isdigit((unsigned char)*p) || (*p == '.' && isdigit((unsigned char)p[1])))
+        {
+            const char* b = p;
+            if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { p += 2; while (isxdigit((unsigned char)*p) || *p == '\'') p++; }
+            else { while (isalnum((unsigned char)*p) || *p == '.' || *p == '\'') p++; }
+            draw(b, p, kCppNumber);
+            continue;
+        }
+        if (isalpha((unsigned char)*p) || *p == '_')
+        {
+            const char* b = p;
+            while (isalnum((unsigned char)*p) || *p == '_') p++;
+            std::string id(b, p);
+            const ImVec4& c = IsKeyword(id) ? kCppKeyword : (IsType(id) ? kCppType : textCol);
+            draw(b, p, c);
+            continue;
+        }
+        const char* b = p; p++; draw(b, p, kCppPunct);
+    }
+    return ImVec2(maxX - origin.x, (pos.y + lineH) - origin.y);
 }
 } // namespace Syntax
