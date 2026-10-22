@@ -1,6 +1,10 @@
 # Memory Browser
 
+[![Build](https://github.com/Unblonded/mem-edit/actions/workflows/build.yml/badge.svg)](https://github.com/Unblonded/mem-edit/actions/workflows/build.yml)
+
 A process memory browser / scanner / editor for Windows, built with C++20, Dear ImGui (docking branch) and DirectX 11.
+
+**Download:** the latest build of `main` is always on the [Nightly release](https://github.com/Unblonded/mem-edit/releases/tag/nightly); tagged versions are under [Releases](https://github.com/Unblonded/mem-edit/releases).
 
 ## Build
 

@@ -1,0 +1,68 @@
+name: Build
+
+# main      -> build, upload the zip as an artifact, refresh the rolling "nightly" pre-release
+# tag v*    -> build and publish a proper release for that tag (e.g. git tag v1.0.0 && git push --tags)
+# PRs       -> build only
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create / replace releases
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      # The project targets the VS 18 toolset (v145); hosted runners ship VS 2022, so build with v143.
+      - name: Build (Release x64)
+        run: msbuild MemoryBrowser.sln /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /v:minimal
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "dist/MemoryBrowser"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item bin/Release/MemoryBrowser.exe, bin/Release/TestTarget.exe $out
+          if (Test-Path README.md) { Copy-Item README.md $out }
+          Compress-Archive -Path "$out/*" -DestinationPath dist/MemoryBrowser-x64.zip -Force
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MemoryBrowser-x64
+          path: dist/MemoryBrowser-x64.zip
+
+      - name: Publish nightly pre-release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Replace the previous nightly so the release always points at the latest main.
+          gh release delete nightly --yes --cleanup-tag
+          if ($LASTEXITCODE -ne 0) { Write-Host "No previous nightly to replace" }
+          $short = $env:GITHUB_SHA.Substring(0, 7)
+          $notes = "Automatic build of ``main`` at $short.`n`nUnzip and run **MemoryBrowser.exe** (Windows 10/11 x64). **TestTarget.exe** is a small practice program to attach to."
+          gh release create nightly dist/MemoryBrowser-x64.zip --prerelease --target $env:GITHUB_SHA --title "Nightly ($short)" --notes $notes
+          exit $LASTEXITCODE
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME dist/MemoryBrowser-x64.zip --verify-tag --title "Memory Browser $env:GITHUB_REF_NAME" --generate-notes
+          exit $LASTEXITCODE
