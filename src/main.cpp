@@ -443,6 +443,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
         gf.bold = io.Fonts->AddFontFromFileTTF(boldPath, uiSize, &ui);
         mergeIcons(uiSize);
         gf.title = io.Fonts->AddFontFromFileTTF(boldPath, uiSize * 1.3f, &ui);
+        mergeIcons(uiSize * 1.3f);
     }
     if (haveIcons)
     {
@@ -472,6 +473,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
         cfg.SizePixels = 13.f * dpi;
         monoFont = io.Fonts->AddFontDefault(&cfg);
     }
+    // Every text face carries the icons, so a menu or label drawn while the mono font is pushed
+    // (address tables, disassembly) still shows them instead of '?' boxes.
+    mergeIcons(monoSize);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);

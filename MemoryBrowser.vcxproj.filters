@@ -38,6 +38,7 @@
     <ClCompile Include="src\code\patches.cpp"><Filter>src\code</Filter></ClCompile>
     <ClCompile Include="src\code\detour.cpp"><Filter>src\code</Filter></ClCompile>
     <ClCompile Include="src\ui\glass.cpp"><Filter>src\ui</Filter></ClCompile>
+    <ClCompile Include="src\ui\syntax.cpp"><Filter>src\ui</Filter></ClCompile>
     <ClCompile Include="src\scan\pointerscan.cpp"><Filter>src\scan</Filter></ClCompile>
     <ClCompile Include="src\scan\aobscan.cpp"><Filter>src\scan</Filter></ClCompile>
     <ClCompile Include="third_party\imgui\imgui.cpp"><Filter>imgui</Filter></ClCompile>
@@ -64,6 +65,7 @@
     <ClInclude Include="src\scan\aobscan.h"><Filter>src\scan</Filter></ClInclude>
     <ClInclude Include="src\ui\icons.h"><Filter>src\ui</Filter></ClInclude>
     <ClInclude Include="src\ui\selection.h"><Filter>src\ui</Filter></ClInclude>
+    <ClInclude Include="src\ui\syntax.h"><Filter>src\ui</Filter></ClInclude>
     <ClInclude Include="src\ui\ui.h"><Filter>src\ui</Filter></ClInclude>
     <ClInclude Include="third_party\imgui\imconfig.h"><Filter>imgui</Filter></ClInclude>
     <ClInclude Include="third_party\imgui\imgui.h"><Filter>imgui</Filter></ClInclude>

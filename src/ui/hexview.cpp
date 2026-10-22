@@ -3,6 +3,7 @@
 #include "code/decompiler.h"
 #include "ui/glass.h"
 #include "ui/icons.h"
+#include "ui/syntax.h"
 #include "imgui.h"
 #include "ui/ui.h"
 
@@ -625,12 +626,27 @@ void HexView::DrawDisasm(Process& proc)
         std::string bytes = BytesToHex(buf, (size_t)len);
         if (bytes.size() < 23) bytes.resize(23, ' '); // ~7 bytes wide, so the text column lines up
 
-        char line[256];
-        snprintf(line, sizeof(line), "%-20s %s  %s", proc.Symbolize(a).c_str(), bytes.c_str(), ok ? text : "??");
+        // Address and bytes in fixed-width columns, then the syntax-highlighted instruction.
+        char head[128];
+        snprintf(head, sizeof(head), "%-20s ", proc.Symbolize(a).c_str());
 
         ImGui::PushID((void*)(uintptr_t)a);
         bool sel = (a == m_cursor);
-        if (ImGui::Selectable(line, sel, ImGuiSelectableFlags_SpanAllColumns)) { clicked = a; didClick = true; }
+        if (ImGui::Selectable("##dline", sel, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, ImGui::GetTextLineHeight())))
+        {
+            clicked = a;
+            didClick = true;
+        }
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 p = ImGui::GetItemRectMin();
+            dl->AddText(p, kColAddr, head);
+            p.x += ImGui::CalcTextSize(head).x;
+            dl->AddText(p, IM_COL32(150, 158, 178, 255), bytes.c_str());
+            p.x += ImGui::CalcTextSize((bytes + "  ").c_str()).x;
+            if (ok) Syntax::DrawInstruction(dl, p, text);
+            else dl->AddText(p, kColZero, "??");
+        }
         if (ImGui::BeginPopupContextItem("##dctx"))
         {
             m_cursor = m_selAnchor = a;

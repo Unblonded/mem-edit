@@ -3,6 +3,7 @@
 #include "code/decompiler.h"
 #include "ui/glass.h"
 #include "ui/icons.h"
+#include "ui/syntax.h"
 #include "imgui.h"
 #include "ui/ui.h"
 #include "imgui_internal.h"
@@ -1012,6 +1013,7 @@ void App::DrawResults()
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) m_resSel.SelectForContextMenu(i);
                 if (ImGui::BeginPopupContextItem("##rctx"))
                 {
+                    if (m_mono) ImGui::PopFont(); // the menu uses the normal UI face, not the table's mono one
                     const size_t n = m_resSel.Count();
                     std::string addLabel = n > 1 ? "Add " + std::to_string(n) + " selected to address list" : "Add to address list";
                     if (ImGui::MenuItem((ICON_ADD "  " + addLabel).c_str(), "Enter")) addSelected();
@@ -1031,6 +1033,7 @@ void App::DrawResults()
                     ImGui::Separator();
                     if (ImGui::MenuItem("Select all", "Ctrl+A")) m_resSel.SelectAll();
                     if (ImGui::MenuItem("Clear selection", "Esc", false, n > 0)) m_resSel.Clear();
+                    if (m_mono) ImGui::PushFont(m_mono);
                     ImGui::EndPopup();
                 }
                 ImGui::PopID();
@@ -1041,8 +1044,7 @@ void App::DrawResults()
                 {
                     bool changed = memcmp(cur.data(), prev, vs) != 0;
                     std::string v = FormatValue(st.type, cur.data(), vs, false);
-                    if (changed) ImGui::TextColored(kColChanged, "%s", v.c_str());
-                    else ImGui::TextUnformatted(v.c_str());
+                    ImGui::TextColored(changed ? kColChanged : Syntax::TypeColor(st.type), "%s", v.c_str());
                 }
                 else
                 {
@@ -1390,7 +1392,10 @@ void App::DrawAddressList()
             const bool multi = w.selected && selCount > 1;
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-FLT_MIN);
-            if (ImGui::BeginCombo("##type", ValueTypeName(w.type)))
+            ImGui::PushStyleColor(ImGuiCol_Text, Syntax::TypeColor(w.type));
+            const bool typeOpen = ImGui::BeginCombo("##type", ValueTypeName(w.type));
+            ImGui::PopStyleColor(); // the list itself keeps normal text
+            if (typeOpen)
             {
                 for (int t = 0; t < (int)ValueType::Count; t++)
                     if (ImGui::Selectable(ValueTypeName((ValueType)t), (int)w.type == t))
@@ -1415,7 +1420,8 @@ void App::DrawAddressList()
             ImGui::TableNextColumn();
             if (m_mono) ImGui::PushFont(m_mono);
             std::string val = readOk ? FormatValue(w.type, buf.data(), sz, w.hex) : "??";
-            if (w.frozen) ImGui::PushStyleColor(ImGuiCol_Text, kColAccent);
+            // Frozen values glow in the accent; others take their type's colour.
+            ImGui::PushStyleColor(ImGuiCol_Text, w.frozen ? kColAccent : readOk ? Syntax::TypeColor(w.type) : Syntax::kDim);
             if (ImGui::Selectable((val + "##val").c_str(), false, ImGuiSelectableFlags_AllowDoubleClick))
             {
                 if (!ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) clickRow = i;
@@ -1427,7 +1433,7 @@ void App::DrawAddressList()
                     m_openEditPopup = true;
                 }
             }
-            if (w.frozen) ImGui::PopStyleColor();
+            ImGui::PopStyleColor();
             if (m_mono) ImGui::PopFont();
             rowContext();
             ImGui::SetItemTooltip("Double-click to change the value");
@@ -1644,16 +1650,25 @@ void App::DrawRegions()
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(HumanSize(r.size).c_str());
                 ImGui::TableNextColumn();
+                // Protection: RWX stands out (code you can patch in place), code is amber, data sky,
+                // read-only dim, inaccessible red.
                 std::string prot = ProtectToString(r.protect);
-                if (IsExecutable(r.protect) && IsWritable(r.protect)) ImGui::TextColored(kColChanged, "%s", prot.c_str());
-                else if (IsExecutable(r.protect)) ImGui::TextColored(kColAccent, "%s", prot.c_str());
-                else ImGui::TextUnformatted(prot.c_str());
+                ImVec4 protCol = !IsReadable(r.protect)                            ? Syntax::kSystem
+                                 : IsExecutable(r.protect) && IsWritable(r.protect) ? Syntax::kJump
+                                 : IsExecutable(r.protect)                          ? Syntax::kCall
+                                 : IsWritable(r.protect)                            ? Syntax::kMove
+                                                                                    : Syntax::kDim;
+                if (r.state != MEM_COMMIT) protCol = Syntax::kDim;
+                ImGui::TextColored(protCol, "%s", prot.c_str());
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(StateToString(r.state).c_str());
+                ImGui::TextColored(r.state == MEM_COMMIT ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : Syntax::kDim, "%s",
+                                   StateToString(r.state).c_str());
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(TypeToString(r.type).c_str());
+                // Type: module images green (like static addresses), heap/stack sky, file mappings orchid.
+                ImVec4 typeCol = r.type == MEM_IMAGE ? Syntax::kModule : r.type == MEM_MAPPED ? Syntax::kSimd : Syntax::kMove;
+                ImGui::TextColored(typeCol, "%s", TypeToString(r.type).c_str());
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(rows[i].owner.c_str());
+                ImGui::TextColored(rows[i].owner.empty() ? Syntax::kDim : Syntax::kModule, "%s", rows[i].owner.c_str());
             }
         }
         ImGui::EndTable();
@@ -1720,7 +1735,13 @@ void App::DrawModules()
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::PushID(i++);
-            if (ImGui::Selectable(m.name.c_str(), false, ImGuiSelectableFlags_SpanAllColumns))
+            // The program's own modules in green; Windows' system DLLs dimmed so they recede.
+            const bool system = Contains(m.path, "\\windows\\");
+            const bool mainExe = Lower(m.name) == Lower(m_proc.Name());
+            ImGui::PushStyleColor(ImGuiCol_Text, mainExe ? kColAccent : system ? Syntax::kDim : Syntax::kModule);
+            bool picked = ImGui::Selectable(m.name.c_str(), false, ImGuiSelectableFlags_SpanAllColumns);
+            ImGui::PopStyleColor();
+            if (picked)
             {
                 m_hex.GoTo(m.base);
                 m_showHex = true;
@@ -1772,7 +1793,7 @@ void App::DrawLog()
     }
     ImGui::Separator();
     ImGui::BeginChild("##logscroll");
-    for (const auto& l : m_log) ImGui::TextUnformatted(l.c_str());
+    for (const auto& l : m_log) Syntax::LogLine(l);
     if (m_logScroll)
     {
         ImGui::SetScrollHereY(1.0f);
@@ -1936,7 +1957,7 @@ void App::DrawTraceWindows()
                 ImGui::TextUnformatted(m_proc.Symbolize(h.address).c_str());
                 ImGui::TableNextColumn();
                 if (m_patches.count(h.address)) ImGui::TextColored(kColChanged, "%s  [NOPed]", h.text.c_str());
-                else ImGui::TextUnformatted(h.text.c_str());
+                else Syntax::Instruction(h.text.c_str());
                 ImGui::TableNextColumn();
                 ImGui::TextDisabled("%s", BytesToHex(h.bytes.data(), h.bytes.size()).c_str());
             }
@@ -2133,7 +2154,7 @@ void App::DrawPatchPanel(const InstructionRow& row)
     if (m_mono) ImGui::PushFont(m_mono);
     ImGui::TextColored(kColAccent, "%s", m_proc.Symbolize(row.address).c_str());
     ImGui::SameLine();
-    ImGui::TextUnformatted(row.text.c_str());
+    Syntax::Instruction(row.text.c_str());
     if (m_mono) ImGui::PopFont();
 
     const CodePatch* existing = m_patchmgr.Find(row.address);
@@ -2268,6 +2289,7 @@ void App::DrawDisasm()
             ImGui::SetItemTooltip("Double-click to edit this instruction in the Memory View");
             if (ImGui::BeginPopupContextItem("##insctx"))
             {
+                if (m_mono) ImGui::PopFont(); // the menu uses the normal UI face, not the table's mono one
                 if (ImGui::MenuItem(ICON_FLASH "  Make AOB signature here")) OpenSigMaker(r.address);
                 if (ImGui::MenuItem(ICON_CHIP "  Edit in Memory View"))
                 {
@@ -2276,6 +2298,7 @@ void App::DrawDisasm()
                     ImGui::SetWindowFocus(kWinHex);
                 }
                 if (ImGui::MenuItem(ICON_COPY "  Copy address")) ImGui::SetClipboardText(ToHex(r.address).c_str());
+                if (m_mono) ImGui::PushFont(m_mono);
                 ImGui::EndPopup();
             }
             if (selected && m_scrollToSelected)
@@ -2288,7 +2311,7 @@ void App::DrawDisasm()
             const CodePatch* p = m_patchmgr.Find(r.address);
             if (p && p->enabled) ImGui::TextColored(kColChanged, "%s", r.text.c_str());
             else if (p) ImGui::TextDisabled("%s  (patch off)", r.text.c_str());
-            else ImGui::TextUnformatted(r.text.c_str());
+            else Syntax::Instruction(r.text.c_str());
             ImGui::TableNextColumn();
             ImGui::TextDisabled("%s", BytesToHex(r.bytes.data(), r.bytes.size()).c_str());
         }
@@ -2620,7 +2643,9 @@ void App::DrawDetours()
                 for (const auto& r : rows)
                 {
                     std::string hex = BytesToHex(r.bytes.data(), r.bytes.size());
-                    ImGui::Text("%-18s %-21s %s", m_proc.Symbolize(r.address).c_str(), hex.c_str(), r.text.c_str());
+                    ImGui::TextDisabled("%-18s %-21s ", m_proc.Symbolize(r.address).c_str(), hex.c_str());
+                    ImGui::SameLine(0, 0);
+                    Syntax::Instruction(r.text.c_str());
                 }
                 if (m_mono) ImGui::PopFont();
 
@@ -3064,7 +3089,7 @@ void App::DrawPointerScan()
                 }
 
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(expr.c_str());
+                Syntax::Expression(expr.c_str());
 
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(ToHex(ch.resolved).c_str());
@@ -3406,7 +3431,7 @@ void App::DrawAobScanTab()
                 }
 
                 ImGui::TableNextColumn();
-                if (insn.ok) ImGui::TextColored(kColAccent, "%s", insn.text.c_str());
+                if (insn.ok) Syntax::Instruction(insn.text.c_str());
                 else ImGui::TextDisabled("(not code)");
 
                 ImGui::TableNextColumn();
@@ -3540,7 +3565,7 @@ void App::DrawSigMakerTab()
                 else ImGui::TextDisabled("??");
             }
             ImGui::TableNextColumn();
-            ImGui::TextColored(kColAccent, "%s", insn.text.c_str());
+            Syntax::Instruction(insn.text.c_str());
             at += insn.length;
         }
         if (m_mono) ImGui::PopFont();
