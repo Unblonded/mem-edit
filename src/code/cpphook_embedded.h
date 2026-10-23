@@ -21,9 +21,10 @@ inline const char* kCppHookIpcH = R"MEMEDITHDR(
 namespace cpphookipc
 {
 constexpr uint32_t kMagic = 0x4b48504a;   // 'JPHK'
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 constexpr uint32_t kArgsMax = 4096;
 constexpr uint32_t kOutMax = 1u << 16;
+constexpr uint32_t kMaxSites = 16;         // distinct hook sites, each passed to OnCall as `site`
 
 struct Block
 {
@@ -31,8 +32,10 @@ struct Block
     uint32_t version;
     volatile uint32_t loadGen;     // DLL bumps this each time a fresh build publishes itself
     volatile uint32_t ready;       // DLL sets 1 once its worker is live
-    volatile uint64_t onCall;      // address of the DLL's hook callback thunk (0 if it has none)
-    volatile uint64_t trampoline;  // host publishes the call-original address before the DLL arms
+    volatile uint32_t siteCount;   // host: number of hook sites in use
+    volatile uint32_t _pad;
+    volatile uint64_t trampolines[kMaxSites]; // host: each site's call-original address (before the DLL arms)
+    volatile uint64_t onCallThunks[kMaxSites];// DLL: each site's callback thunk (0 if the build has no OnCall)
     volatile uint32_t runGen;      // host bumps to request a manual OnRun
     volatile uint32_t runAck;      // DLL copies runGen here when that run has finished
     volatile uint32_t outLen;      // bytes the DLL wrote into out
@@ -53,20 +56,21 @@ inline const char* kMemHookH = R"MEMEDITHDR(
 //
 // You write up to two functions; both are optional:
 //
-//   void OnCall(Regs* r)        runs every time the hooked function is called, INSIDE the target.
-//                               r holds the integer argument registers (rcx/rdx/r8/r9 = args 1-4 in
-//                               the Windows x64 calling convention) and the rest of the GP file.
-//                               Edit them to change the arguments; they are written back before the
-//                               original runs. Call Original(...) yourself to invoke the real
-//                               function, or set r->skipOriginal = true to suppress it.
+//   void OnCall(int site, Regs* r)  runs every time one of your hook sites is reached, INSIDE the
+//                               target. `site` is which one (0 = the first in the window's list, 1 =
+//                               the second, ...), so you can hook several places in one function and
+//                               branch on `site`. r holds the register file at that point (at a
+//                               function entry, rcx/rdx/r8/r9 = args 1-4). Edit them to change the
+//                               registers; they are written back before the stolen code runs. Set
+//                               r->skipOriginal = true to skip the stolen instructions.
 //
 //   void OnRun(const char* a)   runs once each time you press "Run" in the window, with whatever you
-//                               typed in the params box as `a`. Use it to call the hooked function
+//                               typed in the params box as `a`. Use it to call a hooked function
 //                               with custom arguments, poke memory, or print state.
 //
 // Helpers available in both:  Print(fmt, ...) writes to the window's output; Read<T>(addr) /
-// Write<T>(addr, v) touch the target's own memory; Original is the address of the real function
-// (call it through the Fn<> cast, e.g.  Fn<int(int,int)>(Original)(2, 3) ).
+// Write<T>(addr, v) touch the target's own memory; OriginalAt(site) is the call-original address for
+// a site (Original == OriginalAt(0)), called through the Fn<> cast, e.g. Fn<int(int,int)>(Original)(2,3).
 //
 // This header is generated next to your code; you don't edit it.
 #pragma once
@@ -90,7 +94,11 @@ struct Regs
 };
 
 inline cpphookipc::Block* g_block = nullptr;
-inline uint64_t Original = 0; // address of the real (un-hooked) function; cast with Fn<>
+inline uint64_t Original = 0; // site 0's call-original address; cast with Fn<>
+inline uint64_t OriginalAt(int site)
+{
+    return (g_block && site >= 0 && site < (int)cpphookipc::kMaxSites) ? g_block->trampolines[site] : 0;
+}
 
 template <class Sig> inline Sig* Fn(uint64_t addr) { return reinterpret_cast<Sig*>(addr); }
 
@@ -129,20 +137,20 @@ template <class T> inline void Write(uint64_t addr, T v)
 
 // User entry points. /alternatename makes each optional: if you don't define it, it falls back to an
 // empty default, and mem-edit only arms the per-call hook when you actually wrote OnCall.
-extern "C" void OnCall(memhook::Regs* r);
+extern "C" void OnCall(int site, memhook::Regs* r);
 extern "C" void OnRun(const char* args);
-extern "C" void memhook_DefaultOnCall(memhook::Regs*) {}
+extern "C" void memhook_DefaultOnCall(int, memhook::Regs*) {}
 extern "C" void memhook_DefaultOnRun(const char*) {}
 #pragma comment(linker, "/alternatename:OnCall=memhook_DefaultOnCall")
 #pragma comment(linker, "/alternatename:OnRun=memhook_DefaultOnRun")
 
 namespace memhook
 {
-// Builds, at load time, a tiny executable thunk that the hook jumps to: it snapshots the integer
-// registers into a Regs, calls OnCall, writes any edits back, then tail-jumps to Original (which
-// runs the stolen instructions and returns into the real function). MSVC x64 has no __declspec(naked),
-// so the thunk is emitted as machine code here. If OnCall was left at its default, no thunk is made.
-inline void* BuildThunk()
+// Builds, at load time, a tiny executable thunk that a hook site jumps to: it snapshots the integer
+// registers into a Regs, calls OnCall(site, &regs), writes any edits back, then tail-jumps to
+// `trampoline` (which runs the stolen instructions and returns into the function). MSVC x64 has no
+// __declspec(naked), so the thunk is emitted as machine code here.
+inline void* BuildThunk(int site, uint64_t trampoline)
 {
     if ((void*)&OnCall == (void*)&memhook_DefaultOnCall) return nullptr;
 
@@ -184,7 +192,8 @@ inline void* BuildThunk()
     // skipOriginal = 0
     emit({ 0x48, 0xC7, 0x84, 0x24 }); imm32(R + O_skip); imm32(0); // mov qword [rsp+R+128], 0
 
-    emit({ 0x48, 0x8D, 0x4C, 0x24, (uint8_t)R });             // lea rcx, [rsp+0x20]  (&Regs)
+    emit({ 0xB9 }); imm32((uint32_t)site);                    // mov ecx, site        (arg1)
+    emit({ 0x48, 0x8D, 0x54, 0x24, (uint8_t)R });             // lea rdx, [rsp+0x20]  (arg2 = &Regs)
     emit({ 0x48, 0xB8 }); imm64((uint64_t)&OnCall);           // movabs rax, OnCall
     emit({ 0xFF, 0xD0 });                                     // call rax
 
@@ -205,7 +214,7 @@ inline void* BuildThunk()
     // Original path:
     load(rax, R + O_rax);                                     // restore rax
     emit({ 0x48, 0x81, 0xC4 }); imm32(frame);                 // add rsp, 0xA0
-    emit({ 0xFF, 0x25 }); imm32(0); imm64(Original);          // jmp [rip+0]; dq Original
+    emit({ 0xFF, 0x25 }); imm32(0); imm64(trampoline);        // jmp [rip+0]; dq trampoline
 
     void* mem = VirtualAlloc(nullptr, b->size(), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!mem) { delete b; return nullptr; }
@@ -226,10 +235,13 @@ inline DWORD WINAPI Worker(LPVOID)
     Block* blk = (Block*)MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(Block));
     if (!blk) { CloseHandle(map); return 0; }
     g_block = blk;
-    Original = blk->trampoline;
+    Original = blk->trampolines[0];
 
-    void* thunk = BuildThunk();
-    blk->onCall = (uint64_t)thunk;         // host points the hook here (0 = user wrote no OnCall)
+    // One thunk per hook site, each passing its own `site` index and jumping to its trampoline.
+    uint32_t sites = blk->siteCount;
+    if (sites > kMaxSites) sites = kMaxSites;
+    for (uint32_t i = 0; i < kMaxSites; i++)
+        blk->onCallThunks[i] = (i < sites) ? (uint64_t)BuildThunk((int)i, blk->trampolines[i]) : 0;
     // Claim this load. A newer build bumps loadGen again, which retires us so only one worker runs.
     uint32_t myGen = (uint32_t)InterlockedIncrement((volatile LONG*)&blk->loadGen);
     blk->ready = 1;
@@ -243,7 +255,7 @@ inline DWORD WINAPI Worker(LPVOID)
             seen = g;
             blk->outLen = 0;
             blk->out[0] = '\0';
-            Original = blk->trampoline;    // may have been (re)published since load
+            Original = blk->trampolines[0];
             __try { OnRun(blk->args); }
             __except (EXCEPTION_EXECUTE_HANDLER) { Print("\n[run crashed: exception in your code]"); }
             blk->runAck = g;

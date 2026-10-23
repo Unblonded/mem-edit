@@ -15,9 +15,10 @@
 namespace cpphookipc
 {
 constexpr uint32_t kMagic = 0x4b48504a;   // 'JPHK'
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 constexpr uint32_t kArgsMax = 4096;
 constexpr uint32_t kOutMax = 1u << 16;
+constexpr uint32_t kMaxSites = 16;         // distinct hook sites, each passed to OnCall as `site`
 
 struct Block
 {
@@ -25,8 +26,10 @@ struct Block
     uint32_t version;
     volatile uint32_t loadGen;     // DLL bumps this each time a fresh build publishes itself
     volatile uint32_t ready;       // DLL sets 1 once its worker is live
-    volatile uint64_t onCall;      // address of the DLL's hook callback thunk (0 if it has none)
-    volatile uint64_t trampoline;  // host publishes the call-original address before the DLL arms
+    volatile uint32_t siteCount;   // host: number of hook sites in use
+    volatile uint32_t _pad;
+    volatile uint64_t trampolines[kMaxSites]; // host: each site's call-original address (before the DLL arms)
+    volatile uint64_t onCallThunks[kMaxSites];// DLL: each site's callback thunk (0 if the build has no OnCall)
     volatile uint32_t runGen;      // host bumps to request a manual OnRun
     volatile uint32_t runAck;      // DLL copies runGen here when that run has finished
     volatile uint32_t outLen;      // bytes the DLL wrote into out

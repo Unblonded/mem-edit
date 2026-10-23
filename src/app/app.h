@@ -194,9 +194,9 @@ private:
     // C++ Hooks: compile typed C++ to a DLL, inject it, and run it live against a hooked function.
     CppHook m_cpp;
     bool m_showCppHook = false;
-    char m_cppEntry[256] = "";        // address/expression of the function to hook
-    uint64_t m_cppHookedEntry = 0;    // the entry we actually hooked (0 = none)
-    std::string m_cppSource;          // the code editor contents
+    char m_cppEntry[256] = "";            // address/expression to add as a hook site
+    std::vector<uint64_t> m_cppSites;     // the entries we hooked, in order (site index = position)
+    std::string m_cppSource;              // the code editor contents
     std::string m_cppLog;             // build + run output
     char m_cppRunArgs[512] = "";      // params passed to OnRun
     bool m_cppInit = false;           // seeded the editor with the starter template yet?

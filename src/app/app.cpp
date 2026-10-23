@@ -190,7 +190,7 @@ void App::Detach()
     m_tracer.Shutdown();
     m_veh.Shutdown();
     m_cpp.Detach();
-    m_cppHookedEntry = 0;
+    m_cppSites.clear();
     m_traces.clear();
     m_patches.clear();
     // Undo detours and free their caves while we still have the handle.
@@ -2582,13 +2582,18 @@ std::string App::CppStarter() const
         "#include \"memhook.h\"\n"
         "using namespace memhook;\n"
         "\n"
-        "// Runs on EVERY call to the hooked function, inside the target. rcx/rdx/r8/r9 are the\n"
-        "// first four integer/pointer arguments (Windows x64 calling convention).\n"
-        "void OnCall(Regs* r)\n"
+        "// Runs each time a hook site is reached, inside the target. `site` is which one (0 = the\n"
+        "// first in the list below, 1 = the second, ...). rcx/rdx/r8/r9 are the first four args at a\n"
+        "// function entry; mid-function they are whatever is live there.\n"
+        "void OnCall(int site, Regs* r)\n"
         "{\n"
-        "    Print(\"called: arg1=%llu arg2=%llu\\n\", r->rcx, r->rdx);\n"
-        "    // r->rcx = 999;          // change an argument before the original runs\n"
-        "    // r->skipOriginal = 1;   // or stop the original from running at all\n"
+        "    if (site == 0)\n"
+        "    {\n"
+        "        Print(\"site 0: arg1=%llu arg2=%llu\\n\", r->rcx, r->rdx);\n"
+        "        // r->rcx = 999;          // change a register before the stolen code runs\n"
+        "        // r->skipOriginal = 1;   // or skip the stolen instructions entirely\n"
+        "    }\n"
+        "    // else if (site == 1) { ... }   // a second hook site\n"
         "}\n"
         "\n"
         "// Runs when you press Run, with the Params box passed as `args`.\n"
@@ -2632,12 +2637,12 @@ std::string App::CppTemplateFor(uint64_t entry) const
     return "#include \"memhook.h\"\n"
            "using namespace memhook;\n\n" +
            ref +
-           "// rcx/rdx/r8/r9 = first four integer/pointer arguments (Windows x64).\n"
-           "void OnCall(Regs* r)\n"
+           "// `site` is which hook site fired (0 = first in the list). rcx/rdx/r8/r9 = first four args.\n"
+           "void OnCall(int site, Regs* r)\n"
            "{\n"
            "    // Reproduce or tweak the behaviour above. Edit r->rcx etc., or:\n"
-           "    // auto orig = Fn<long long(long long, long long)>(Original);\n"
-           "    // r->skipOriginal = 1;   // replace the original entirely\n"
+           "    // auto orig = Fn<long long(long long, long long)>(OriginalAt(site));\n"
+           "    // r->skipOriginal = 1;   // skip the stolen instructions\n"
            "}\n\n"
            "void OnRun(const char* args)\n"
            "{\n"
@@ -2663,59 +2668,73 @@ void App::DrawCppHooks()
     if (!m_cpp.Available(whyNot))
         ImGui::TextColored(kColErr, ICON_WARNING "  %s", whyNot.c_str());
 
-    // --- Target function + hook controls ---
-    ImGui::TextUnformatted("Function");
+    // Drop sites whose detour was removed elsewhere, so the list stays truthful.
+    for (size_t i = 0; i < m_cppSites.size();)
+    {
+        if (!m_detours.Find(m_cppSites[i])) m_cppSites.erase(m_cppSites.begin() + i);
+        else i++;
+    }
+
+    // --- Hook sites: add an address, each becomes a `site` index passed to OnCall ---
+    ImGui::TextUnformatted("Hook site");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(260);
-    ImGui::InputTextWithHint("##cppentry", "address or module.exe+1F0", m_cppEntry, sizeof(m_cppEntry));
-
+    bool addEnter = ImGui::InputTextWithHint("##cppentry", "address or module.exe+1F0", m_cppEntry, sizeof(m_cppEntry),
+                                             ImGuiInputTextFlags_EnterReturnsTrue);
     uint64_t entry = 0;
     bool haveEntry = EvaluateAddress(m_proc, m_cppEntry, entry);
-    const bool hooked = m_cppHookedEntry && m_detours.Find(m_cppHookedEntry);
-    if (!hooked) m_cppHookedEntry = 0;
-
     ImGui::SameLine();
-    if (!hooked)
+    ImGui::BeginDisabled(!haveEntry || m_cppSites.size() >= 16);
+    bool addSite = Glass::AccentButton(ICON_ADD "  Add hook site") || (addEnter && haveEntry);
+    ImGui::EndDisabled();
+    if (addSite && haveEntry)
     {
-        if (Glass::AccentButton(ICON_FLASH "  Install hook") && haveEntry)
+        if (m_detours.Find(entry)) m_cppLog = "That address is already hooked.";
+        else
         {
             std::string err;
             uint64_t tramp = 0;
             if (m_detours.InstallHook(m_proc, entry, 0, tramp, err))
             {
-                m_cppHookedEntry = entry;
                 m_cpp.Attach(m_proc, err);
-                m_cpp.SetTrampoline(tramp);
-                // Seed the editor with the original function (decompiled) unless you've edited it.
-                if (m_cppSource.empty() || m_cppSource == CppStarter())
-                    m_cppSource = CppTemplateFor(entry);
-                m_cppLog = "Hooked " + m_proc.Symbolize(entry) + " (passthrough). Compile & Apply to run your code.";
-                Log("C++ hook installed on " + m_proc.Symbolize(entry));
+                if (m_cppSites.empty() && (m_cppSource.empty() || m_cppSource == CppStarter()))
+                    m_cppSource = CppTemplateFor(entry);   // seed from the first site's function
+                m_cppSites.push_back(entry);
+                m_cppLog = "Hooked site " + std::to_string(m_cppSites.size() - 1) + " at " +
+                           m_proc.Symbolize(entry) + ". Compile & Apply to run your code.";
+                Log("C++ hook site added at " + m_proc.Symbolize(entry));
             }
             else { m_cppLog = err; Log("C++ hook failed: " + err); }
         }
     }
-    else
+
+    if (m_cppSites.empty())
+        ImGui::TextDisabled("No hook sites - you can still write OnRun and press Run without hooking.");
+    for (size_t i = 0; i < m_cppSites.size(); i++)
     {
-        if (ImGui::Button(ICON_DELETE "  Remove hook"))
+        ImGui::PushID((int)i);
+        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.5f, 1), ICON_SHIELD_FILL "  site %d:", (int)i);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(m_proc.Symbolize(m_cppSites[i]).c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_DELETE "##rm"))
         {
-            m_detours.Remove(m_proc, m_cppHookedEntry);
-            Log("Removed C++ hook on " + m_proc.Symbolize(m_cppHookedEntry));
-            m_cppHookedEntry = 0;
+            m_detours.Remove(m_proc, m_cppSites[i]);
+            Log("Removed C++ hook site at " + m_proc.Symbolize(m_cppSites[i]));
+            m_cppSites.erase(m_cppSites.begin() + i);
+            ImGui::PopID();
+            break;
         }
+        ImGui::PopID();
     }
 
-    if (hooked)
-        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.5f, 1), ICON_SHIELD_FILL "  Hooked at %s",
-                           m_proc.Symbolize(m_cppHookedEntry).c_str());
-    else
-        ImGui::TextDisabled("Not hooked - you can still write OnRun and press Run without hooking.");
-
-    // Pull the original function in as a starting point, and toggle colouring.
-    if (ImGui::Button(ICON_CODE "  Load original as template") && (haveEntry || hooked))
-        m_cppSource = CppTemplateFor(hooked ? m_cppHookedEntry : entry);
-    ImGui::SetItemTooltip("Replaces the editor with the hooked function decompiled to pseudo-C,\n"
-                          "so you can rebuild or tweak its behaviour in your hook.");
+    // Pull a function in as a starting point, and toggle colouring.
+    uint64_t templateFrom = !m_cppSites.empty() ? m_cppSites[0] : (haveEntry ? entry : 0);
+    ImGui::BeginDisabled(templateFrom == 0);
+    if (ImGui::Button(ICON_CODE "  Load original as template"))
+        m_cppSource = CppTemplateFor(templateFrom);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Replaces the editor with the first site's function decompiled to pseudo-C.");
     ImGui::SameLine();
     ImGui::Checkbox("Syntax highlight", &m_cppHighlight);
 
@@ -2741,7 +2760,7 @@ void App::DrawCppHooks()
     if (Glass::AccentButton(ICON_REFRESH "  Compile & Apply"))
     {
         std::string log;
-        bool ok = m_cpp.Apply(m_proc, m_detours, m_cppHookedEntry, m_cppSource, log);
+        bool ok = m_cpp.Apply(m_proc, m_detours, m_cppSites, m_cppSource, log);
         m_cppLog = log;
         Log(ok ? "C++ build applied." : "C++ build failed.");
     }

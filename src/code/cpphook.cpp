@@ -252,7 +252,7 @@ bool CppHook::Inject(const std::string& dll, std::string& error)
     return true;
 }
 
-bool CppHook::Apply(const Process& proc, DetourManager& det, uint64_t hookedEntry,
+bool CppHook::Apply(const Process& proc, DetourManager& det, const std::vector<uint64_t>& sites,
                     const std::string& source, std::string& log)
 {
     if (!Attach(proc, log)) return false;
@@ -260,11 +260,19 @@ bool CppHook::Apply(const Process& proc, DetourManager& det, uint64_t hookedEntr
     std::string dll;
     if (!Compile(source, dll, log)) return false;
 
-    // Make sure the trampoline for the hooked function is published before the DLL arms itself.
-    if (hookedEntry)
+    // Publish each site's trampoline (and the count) before the DLL arms itself.
+    uint32_t n = (uint32_t)sites.size();
+    if (n > cpphookipc::kMaxSites) n = cpphookipc::kMaxSites;
+    m_block->siteCount = n;
+    for (uint32_t i = 0; i < cpphookipc::kMaxSites; i++)
     {
-        const Detour* d = det.Find(hookedEntry);
-        if (d && d->cave) m_block->trampoline = d->cave + 16; // dispatch is 16 bytes; tramp follows
+        uint64_t tramp = 0;
+        if (i < n)
+        {
+            const Detour* d = det.Find(sites[i]);
+            if (d && d->cave) tramp = d->cave + 16; // 16-byte dispatch; trampoline follows
+        }
+        m_block->trampolines[i] = tramp;
     }
 
     uint32_t oldGen = m_block->loadGen;
@@ -280,15 +288,18 @@ bool CppHook::Apply(const Process& proc, DetourManager& det, uint64_t hookedEntr
     }
     for (int i = 0; i < 200 && !m_block->ready; i++) Sleep(10);
 
-    if (hookedEntry)
+    bool anyArmed = false;
+    for (uint32_t i = 0; i < n; i++)
     {
-        uint64_t target = m_block->onCall ? m_block->onCall : m_block->trampoline;
-        det.SetHookTarget(proc, hookedEntry, target);
+        uint64_t thunk = m_block->onCallThunks[i];
+        uint64_t target = thunk ? thunk : m_block->trampolines[i]; // no OnCall -> passthrough
+        det.SetHookTarget(proc, sites[i], target);
+        if (thunk) anyArmed = true;
     }
 
     char ver[96];
     snprintf(ver, sizeof(ver), "Build %u loaded%s.", m_block->loadGen,
-             m_block->onCall ? " (OnCall armed)" : (hookedEntry ? " (no OnCall - passthrough)" : ""));
+             n == 0 ? "" : (anyArmed ? " (OnCall armed)" : " (no OnCall - passthrough)"));
     if (!log.empty()) log += "\n";
     log += ver;
     return true;

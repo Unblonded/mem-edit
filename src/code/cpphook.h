@@ -5,6 +5,7 @@
 
 #include <windows.h>
 #include <string>
+#include <vector>
 
 // Compiles the C++ you type in the "C++ Hooks" window into a DLL, injects it into the target, and
 // bridges to it through a shared-memory block (cpphook_ipc.h). The DLL's OnCall runs on every call
@@ -22,20 +23,17 @@ public:
     bool Attached() const { return m_block != nullptr; }
     DWORD Pid() const { return m_pid; }
 
-    // Full cycle: compile `source`, inject the DLL, wait for it to publish, and (if an entry is
-    // hooked) swap the hook's target to the new OnCall. `log` gets the compiler output on failure.
-    bool Apply(const Process& proc, DetourManager& det, uint64_t hookedEntry,
+    // Full cycle: compile `source`, inject the DLL, wait for it to publish, and point each hook site
+    // at its new per-site OnCall thunk. `sites` are the hooked entries, in order (site index = list
+    // position). `log` gets the compiler output on failure.
+    bool Apply(const Process& proc, DetourManager& det, const std::vector<uint64_t>& sites,
                const std::string& source, std::string& log);
 
     // Trigger OnRun once with `args`; blocks briefly for it to finish and returns its printed output.
     bool Run(const std::string& args, std::string& out, std::string& error);
 
-    uint64_t OnCallAddr() const { return m_block ? m_block->onCall : 0; }
     uint32_t LoadGen() const { return m_block ? m_block->loadGen : 0; }
     const std::string& BuildDir() const { return m_buildDir; }
-
-    // Publish the trampoline the injected code calls to reach the un-hooked function.
-    void SetTrampoline(uint64_t tramp) { if (m_block) m_block->trampoline = tramp; }
 
 private:
     bool Compile(const std::string& source, std::string& dllPath, std::string& log);
