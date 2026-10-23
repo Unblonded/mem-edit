@@ -2585,10 +2585,8 @@ std::string App::CppStarter() const
         "// Runs each time a hook site is reached, inside the target. `site` is which one (0 = the\n"
         "// first in the list below, 1 = the second, ...). rcx/rdx/r8/r9 are the first four args at a\n"
         "// function entry; mid-function they are whatever is live there.\n"
-        "void OnCall(int site, Regs* r)\n"
-        "{\n"
-        "    switch (site)\n"
-        "    {\n"
+        "void OnCall(int site, Regs* r) {\n"
+        "    switch (site) {\n"
         "    case 0:\n"
         "        Print(\"site 0: arg1=%llu arg2=%llu\\n\", r->rcx, r->rdx);\n"
         "        // r->rcx = 999;          // change a register before the stolen code runs\n"
@@ -2600,8 +2598,7 @@ std::string App::CppStarter() const
         "}\n"
         "\n"
         "// Runs when you press Run, with the Params box passed as `args`.\n"
-        "void OnRun(const char* args)\n"
-        "{\n"
+        "void OnRun(const char* args) {\n"
         "    Print(\"Run with: %s\\n\", args);\n"
         "    // Call the real function yourself with custom parameters:\n"
         "    // auto fn = Fn<long long(long long, long long)>(Original);\n"
@@ -2641,10 +2638,8 @@ std::string App::CppTemplateFor(uint64_t entry) const
            "using namespace memhook;\n\n" +
            ref +
            "// `site` is which hook site fired (0 = first in the list). rcx/rdx/r8/r9 = first four args.\n"
-           "void OnCall(int site, Regs* r)\n"
-           "{\n"
-           "    switch (site)\n"
-           "    {\n"
+           "void OnCall(int site, Regs* r) {\n"
+           "    switch (site) {\n"
            "    case 0:\n"
            "        // Reproduce or tweak the behaviour above. Edit r->rcx etc., or:\n"
            "        // auto orig = Fn<long long(long long, long long)>(OriginalAt(site));\n"
@@ -2652,8 +2647,7 @@ std::string App::CppTemplateFor(uint64_t entry) const
            "        break;\n"
            "    }\n"
            "}\n\n"
-           "void OnRun(const char* args)\n"
-           "{\n"
+           "void OnRun(const char* args) {\n"
            "}\n";
 }
 
